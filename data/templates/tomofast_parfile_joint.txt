@@ -1,0 +1,115 @@
+!=======================================================================
+! Tomofast-x Parameter File: JOINT GRAVITY + MAGNETIC INVERSION
+! Template with placeholders for automated configuration
+!=======================================================================
+
+!-----------------------------------------------------------------------
+! Global parameters
+!-----------------------------------------------------------------------
+global.outputFolderPath = {{OUTPUT_FOLDER}}
+global.description = {{DESCRIPTION}}
+global.nDataComponents = 2
+
+!-----------------------------------------------------------------------
+! Forward problem - Component 1: GRAVITY
+!-----------------------------------------------------------------------
+forward.data(1).type = gravity
+forward.data(1).dataFilename = {{GRAVITY_DATA_FILE}}
+forward.data(1).nData = {{N_GRAVITY_DATA}}
+
+forward.data(1).meshFilename = {{GRAVITY_MESH_FILE}}
+forward.data(1).nModelCells = {{N_GRAVITY_MODEL_CELLS}}
+
+forward.data(1).startingModelFilename = {{GRAVITY_STARTING_MODEL_FILE}}
+forward.data(1).startingModelValue = {{GRAVITY_STARTING_MODEL_VALUE}}
+
+forward.data(1).referenceModelFilename = {{GRAVITY_REFERENCE_MODEL_FILE}}
+forward.data(1).referenceModelValue = {{GRAVITY_REFERENCE_MODEL_VALUE}}
+
+forward.data(1).depthWeighting.type = {{GRAVITY_DEPTH_WEIGHT_TYPE}}
+forward.data(1).depthWeighting.beta = {{GRAVITY_DEPTH_WEIGHT_BETA}}
+forward.data(1).depthWeighting.z0 = {{GRAVITY_DEPTH_WEIGHT_Z0}}
+
+forward.data(1).modelBounds.lower = {{GRAVITY_MODEL_BOUND_LOWER}}
+forward.data(1).modelBounds.upper = {{GRAVITY_MODEL_BOUND_UPPER}}
+
+forward.data(1).dataUncertaintyFilename = {{GRAVITY_UNCERTAINTY_FILE}}
+forward.data(1).dataUncertaintyType = {{GRAVITY_UNCERTAINTY_TYPE}}
+
+forward.data(1).sensitivityMatrixFilename = {{GRAVITY_SENSITIVITY_FILE}}
+forward.data(1).sensitivityCompression = {{GRAVITY_SENSITIVITY_COMPRESSION}}
+
+!-----------------------------------------------------------------------
+! Forward problem - Component 2: MAGNETIC
+!-----------------------------------------------------------------------
+forward.data(2).type = magnetism
+forward.data(2).dataFilename = {{MAGNETIC_DATA_FILE}}
+forward.data(2).nData = {{N_MAGNETIC_DATA}}
+
+forward.data(2).fieldStrength = {{FIELD_STRENGTH_NT}}
+forward.data(2).fieldInclination = {{FIELD_INCLINATION_DEG}}
+forward.data(2).fieldDeclination = {{FIELD_DECLINATION_DEG}}
+forward.data(2).magnetizationInclination = {{MAGNETIZATION_INCLINATION_DEG}}
+forward.data(2).magnetizationDeclination = {{MAGNETIZATION_DECLINATION_DEG}}
+
+forward.data(2).meshFilename = {{MAGNETIC_MESH_FILE}}
+forward.data(2).nModelCells = {{N_MAGNETIC_MODEL_CELLS}}
+
+forward.data(2).startingModelFilename = {{MAGNETIC_STARTING_MODEL_FILE}}
+forward.data(2).startingModelValue = {{MAGNETIC_STARTING_MODEL_VALUE}}
+
+forward.data(2).referenceModelFilename = {{MAGNETIC_REFERENCE_MODEL_FILE}}
+forward.data(2).referenceModelValue = {{MAGNETIC_REFERENCE_MODEL_VALUE}}
+
+forward.data(2).depthWeighting.type = {{MAGNETIC_DEPTH_WEIGHT_TYPE}}
+forward.data(2).depthWeighting.beta = {{MAGNETIC_DEPTH_WEIGHT_BETA}}
+forward.data(2).depthWeighting.z0 = {{MAGNETIC_DEPTH_WEIGHT_Z0}}
+
+forward.data(2).modelBounds.lower = {{MAGNETIC_MODEL_BOUND_LOWER}}
+forward.data(2).modelBounds.upper = {{MAGNETIC_MODEL_BOUND_UPPER}}
+
+forward.data(2).dataUncertaintyFilename = {{MAGNETIC_UNCERTAINTY_FILE}}
+forward.data(2).dataUncertaintyType = {{MAGNETIC_UNCERTAINTY_TYPE}}
+
+forward.data(2).sensitivityMatrixFilename = {{MAGNETIC_SENSITIVITY_FILE}}
+forward.data(2).sensitivityCompression = {{MAGNETIC_SENSITIVITY_COMPRESSION}}
+
+!-----------------------------------------------------------------------
+! Inversion parameters
+!-----------------------------------------------------------------------
+inversion.type = {{INVERSION_TYPE}}
+inversion.nMajorIterations = {{N_MAJOR_ITERATIONS}}
+inversion.nMinorIterations = {{N_MINOR_ITERATIONS}}
+inversion.minResidual = {{MIN_RESIDUAL}}
+
+!-----------------------------------------------------------------------
+! Regularization - Gravity (Component 1)
+!-----------------------------------------------------------------------
+inversion.regularization(1).type = {{GRAVITY_REGULARIZATION_TYPE}}
+inversion.regularization(1).alpha_s = {{GRAVITY_ALPHA_S}}
+inversion.regularization(1).alpha_x = {{GRAVITY_ALPHA_X}}
+inversion.regularization(1).alpha_y = {{GRAVITY_ALPHA_Y}}
+inversion.regularization(1).alpha_z = {{GRAVITY_ALPHA_Z}}
+
+!-----------------------------------------------------------------------
+! Regularization - Magnetic (Component 2)
+!-----------------------------------------------------------------------
+inversion.regularization(2).type = {{MAGNETIC_REGULARIZATION_TYPE}}
+inversion.regularization(2).alpha_s = {{MAGNETIC_ALPHA_S}}
+inversion.regularization(2).alpha_x = {{MAGNETIC_ALPHA_X}}
+inversion.regularization(2).alpha_y = {{MAGNETIC_ALPHA_Y}}
+inversion.regularization(2).alpha_z = {{MAGNETIC_ALPHA_Z}}
+
+!-----------------------------------------------------------------------
+! Joint inversion coupling
+!-----------------------------------------------------------------------
+joint.couplingType = {{COUPLING_TYPE}}
+joint.couplingWeight = {{COUPLING_WEIGHT}}
+joint.structuralSimilarity = {{STRUCTURAL_SIMILARITY}}
+joint.crossGradientWeight = {{CROSS_GRADIENT_WEIGHT}}
+
+!-----------------------------------------------------------------------
+! Output control
+!-----------------------------------------------------------------------
+global.writeModelEveryNIterations = {{WRITE_MODEL_EVERY_N}}
+global.writeDataEveryNIterations = {{WRITE_DATA_EVERY_N}}

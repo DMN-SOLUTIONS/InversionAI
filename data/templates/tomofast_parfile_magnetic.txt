@@ -1,0 +1,96 @@
+!=======================================================================
+! Tomofast-x Parameter File: MAGNETIC INVERSION
+! Template with placeholders for automated configuration
+!=======================================================================
+
+!-----------------------------------------------------------------------
+! Global parameters
+!-----------------------------------------------------------------------
+global.outputFolderPath = {{OUTPUT_FOLDER}}
+global.description = {{DESCRIPTION}}
+
+!-----------------------------------------------------------------------
+! Forward problem (magnetic)
+!-----------------------------------------------------------------------
+forward.data(1).type = magnetism
+forward.data(1).dataFilename = {{MAGNETIC_DATA_FILE}}
+forward.data(1).nData = {{N_DATA}}
+
+!-----------------------------------------------------------------------
+! Inducing field parameters
+!-----------------------------------------------------------------------
+forward.data(1).fieldStrength = {{FIELD_STRENGTH_NT}}
+forward.data(1).fieldInclination = {{FIELD_INCLINATION_DEG}}
+forward.data(1).fieldDeclination = {{FIELD_DECLINATION_DEG}}
+
+!-----------------------------------------------------------------------
+! Magnetization direction (for induced, same as field)
+!-----------------------------------------------------------------------
+forward.data(1).magnetizationInclination = {{MAGNETIZATION_INCLINATION_DEG}}
+forward.data(1).magnetizationDeclination = {{MAGNETIZATION_DECLINATION_DEG}}
+
+!-----------------------------------------------------------------------
+! Model grid / mesh
+!-----------------------------------------------------------------------
+forward.data(1).meshFilename = {{MESH_FILE}}
+forward.data(1).nModelCells = {{N_MODEL_CELLS}}
+
+!-----------------------------------------------------------------------
+! Starting model
+!-----------------------------------------------------------------------
+forward.data(1).startingModelFilename = {{STARTING_MODEL_FILE}}
+forward.data(1).startingModelValue = {{STARTING_MODEL_VALUE}}
+
+!-----------------------------------------------------------------------
+! Reference model (for regularization)
+!-----------------------------------------------------------------------
+forward.data(1).referenceModelFilename = {{REFERENCE_MODEL_FILE}}
+forward.data(1).referenceModelValue = {{REFERENCE_MODEL_VALUE}}
+
+!-----------------------------------------------------------------------
+! Depth weighting
+!-----------------------------------------------------------------------
+forward.data(1).depthWeighting.type = {{DEPTH_WEIGHT_TYPE}}
+forward.data(1).depthWeighting.beta = {{DEPTH_WEIGHT_BETA}}
+forward.data(1).depthWeighting.z0 = {{DEPTH_WEIGHT_Z0}}
+
+!-----------------------------------------------------------------------
+! Model bounds
+!-----------------------------------------------------------------------
+forward.data(1).modelBounds.lower = {{MODEL_BOUND_LOWER}}
+forward.data(1).modelBounds.upper = {{MODEL_BOUND_UPPER}}
+
+!-----------------------------------------------------------------------
+! Inversion parameters
+!-----------------------------------------------------------------------
+inversion.type = {{INVERSION_TYPE}}
+inversion.nMajorIterations = {{N_MAJOR_ITERATIONS}}
+inversion.nMinorIterations = {{N_MINOR_ITERATIONS}}
+inversion.minResidual = {{MIN_RESIDUAL}}
+
+!-----------------------------------------------------------------------
+! Regularization
+!-----------------------------------------------------------------------
+inversion.regularization(1).type = {{REGULARIZATION_TYPE}}
+inversion.regularization(1).alpha_s = {{ALPHA_S}}
+inversion.regularization(1).alpha_x = {{ALPHA_X}}
+inversion.regularization(1).alpha_y = {{ALPHA_Y}}
+inversion.regularization(1).alpha_z = {{ALPHA_Z}}
+
+!-----------------------------------------------------------------------
+! Data weighting / uncertainties
+!-----------------------------------------------------------------------
+forward.data(1).dataUncertaintyFilename = {{UNCERTAINTY_FILE}}
+forward.data(1).dataUncertaintyType = {{UNCERTAINTY_TYPE}}
+
+!-----------------------------------------------------------------------
+! Sensitivity matrix
+!-----------------------------------------------------------------------
+forward.data(1).sensitivityMatrixFilename = {{SENSITIVITY_FILE}}
+forward.data(1).sensitivityCompression = {{SENSITIVITY_COMPRESSION}}
+
+!-----------------------------------------------------------------------
+! Output control
+!-----------------------------------------------------------------------
+global.writeModelEveryNIterations = {{WRITE_MODEL_EVERY_N}}
+global.writeDataEveryNIterations = {{WRITE_DATA_EVERY_N}}
