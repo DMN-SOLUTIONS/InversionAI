@@ -775,6 +775,9 @@ def _render_3d_model(model: np.ndarray, title: str):
     """Render a full 3D interactive isosurface visualization of the model."""
     nx, ny, nz = model.shape
 
+    # Opacity slider
+    opacity_val = st.slider("Opacity", 0.1, 1.0, 0.9, 0.05, key="iso_opacity")
+
     # Create coordinate arrays
     X, Y, Z = np.mgrid[0:nx, 0:ny, 0:nz]
 
@@ -787,10 +790,18 @@ def _render_3d_model(model: np.ndarray, title: str):
     # Use isosurface for 3D visualization (efficient for large models)
     vmin, vmax = float(values.min()), float(values.max())
 
-    # Create multiple isosurface levels
-    n_levels = 6
-    isomin = vmin + 0.1 * (vmax - vmin)
-    isomax = vmax - 0.1 * (vmax - vmin)
+    # Focus on the anomalous body: use tighter iso range centered on high values
+    # Skip the background (near-zero) values to highlight the body
+    mean_val = float(values.mean())
+    std_val = float(values.std())
+    isomin = mean_val + 0.5 * std_val  # Only show above-average values
+    isomax = vmax - 0.05 * (vmax - vmin)
+
+    # If model has both positive and negative anomalies, show both
+    if vmin < mean_val - std_val:
+        isomin = vmin + 0.05 * (vmax - vmin)
+
+    n_levels = 8  # More surfaces for better body definition
 
     fig = go.Figure(data=go.Isosurface(
         x=x_flat, y=y_flat, z=z_flat,
@@ -800,7 +811,7 @@ def _render_3d_model(model: np.ndarray, title: str):
         surface_count=n_levels,
         colorscale='RdBu_r',
         caps=dict(x_show=True, y_show=True, z_show=True),
-        opacity=0.6,
+        opacity=opacity_val,
         colorbar=dict(title="Density (kg/m³)", thickness=20, len=0.7),
         hovertemplate="X: %{x}<br>Y: %{y}<br>Z: %{z}<br>Value: %{value:.4f}<extra></extra>",
     ))
@@ -808,9 +819,9 @@ def _render_3d_model(model: np.ndarray, title: str):
     fig.update_layout(
         title=dict(text=f"3D Model — {title}", x=0.5, font=dict(size=16)),
         scene=dict(
-            xaxis_title="X cell",
-            yaxis_title="Y cell",
-            zaxis_title="Z cell (depth)",
+            xaxis_title="X",
+            yaxis_title="Y",
+            zaxis_title="Z (depth)",
             aspectmode='data',
             camera=dict(
                 eye=dict(x=1.6, y=-1.6, z=-1.2),
@@ -828,14 +839,16 @@ def _render_3d_sections(model: np.ndarray, title: str):
     """Render 3D model with interactive orthogonal slice planes."""
     nx, ny, nz = model.shape
 
-    # Sliders for slice positions
-    sl_col1, sl_col2, sl_col3 = st.columns(3)
+    # Sliders for slice positions and opacity
+    sl_col1, sl_col2, sl_col3, sl_col4 = st.columns(4)
     with sl_col1:
         sec_z = st.slider("Z-plane (depth)", 0, nz - 1, nz // 2, key="sec3d_z")
     with sl_col2:
         sec_x = st.slider("X-plane", 0, nx - 1, nx // 2, key="sec3d_x")
     with sl_col3:
         sec_y = st.slider("Y-plane", 0, ny - 1, ny // 2, key="sec3d_y")
+    with sl_col4:
+        sec_opacity = st.slider("Opacity", 0.1, 1.0, 0.9, 0.05, key="sec3d_opacity")
 
     fig = go.Figure()
 
@@ -850,7 +863,7 @@ def _render_3d_sections(model: np.ndarray, title: str):
         colorscale='RdBu_r', cmin=vmin, cmax=vmax,
         showscale=True,
         colorbar=dict(title="Density (kg/m³)", thickness=20, len=0.7, x=1.02),
-        opacity=0.9,
+        opacity=sec_opacity,
         name=f"Z={sec_z}",
         hovertemplate="X: %{x}<br>Y: %{y}<br>Z: %{z}<br>Value: %{surfacecolor:.4f}<extra>Z-plane</extra>",
     ))
@@ -864,7 +877,7 @@ def _render_3d_sections(model: np.ndarray, title: str):
         surfacecolor=x_slice,
         colorscale='RdBu_r', cmin=vmin, cmax=vmax,
         showscale=False,
-        opacity=0.9,
+        opacity=sec_opacity,
         name=f"X={sec_x}",
         hovertemplate="X: %{x}<br>Y: %{y}<br>Z: %{z}<br>Value: %{surfacecolor:.4f}<extra>X-plane</extra>",
     ))
@@ -879,7 +892,7 @@ def _render_3d_sections(model: np.ndarray, title: str):
         surfacecolor=y_slice,
         colorscale='RdBu_r', cmin=vmin, cmax=vmax,
         showscale=False,
-        opacity=0.9,
+        opacity=sec_opacity,
         name=f"Y={sec_y}",
         hovertemplate="X: %{x}<br>Y: %{y}<br>Z: %{z}<br>Value: %{surfacecolor:.4f}<extra>Y-plane</extra>",
     ))
@@ -887,9 +900,9 @@ def _render_3d_sections(model: np.ndarray, title: str):
     fig.update_layout(
         title=dict(text=f"3D Cross-Sections — {title}", x=0.5, font=dict(size=16)),
         scene=dict(
-            xaxis_title="X cell",
-            yaxis_title="Y cell",
-            zaxis_title="Z cell (depth)",
+            xaxis_title="X",
+            yaxis_title="Y",
+            zaxis_title="Z (depth)",
             aspectmode='data',
             camera=dict(
                 eye=dict(x=1.6, y=-1.6, z=-1.2),
@@ -913,15 +926,15 @@ def _render_slice(model: np.ndarray, title: str, idx: int, axis: str = "z"):
     if axis == "z":
         idx = min(idx, model.shape[2] - 1)
         slice_data = model[:, :, idx]
-        xlabel, ylabel = "X cell", "Y cell"
+        xlabel, ylabel = "X", "Y"
     elif axis == "x":
         idx = min(idx, model.shape[0] - 1)
         slice_data = model[idx, :, :]
-        xlabel, ylabel = "Y cell", "Z cell"
+        xlabel, ylabel = "Y", "Z"
     elif axis == "y":
         idx = min(idx, model.shape[1] - 1)
         slice_data = model[:, idx, :]
-        xlabel, ylabel = "X cell", "Z cell"
+        xlabel, ylabel = "X", "Z"
     else:
         return
 

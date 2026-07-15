@@ -2,12 +2,14 @@ services:
   app:
     build: .
     ports:
-      - "8501:8501"
+      - "8505:8501"
     env_file:
       - .env
     volumes:
       - ./data:/app/data
       - ./output:/app/output
+      - tomofast_output:/app/Tomofast-x/output
+      - tomofast_workspace:/app/Tomofast-x/workspace
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
       interval: 30s
@@ -15,3 +17,7 @@ services:
       start_period: 15s
       retries: 3
     restart: unless-stopped
+
+volumes:
+  tomofast_output:
+  tomofast_workspace:

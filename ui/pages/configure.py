@@ -319,10 +319,6 @@ def render_configure_page():
 
     st.markdown("---")
 
-    # === Mesh Preview ===
-    st.subheader("👁️ Mesh Extent Preview")
-    render_mesh_preview(df, config)
-
     # Save configuration
     st.session_state.config = config
 
