@@ -1,0 +1,14 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "env": { "value": "prod" },
+    "location": { "value": "australiaeast" },
+    "acrName": { "value": "inversionaicr" },
+    "imageTag": { "value": "prod-latest" },
+    "anthropicApiKey": { "value": "" },
+    "openaiApiKey": { "value": "" },
+    "llmProvider": { "value": "anthropic" },
+    "llmModel": { "value": "claude-sonnet-4-20250514" }
+  }
+}
