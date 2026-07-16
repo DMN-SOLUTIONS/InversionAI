@@ -715,7 +715,17 @@ def render_run_page():
                     key="active_data_type",
                 )
 
-            # Expandable details: show what will be generated
+            # Show selected engines from Setup page
+            use_tomo = st.session_state.get("use_tomofast", False)
+            use_simpeg = st.session_state.get("use_simpeg", False)
+            if use_tomo and use_simpeg:
+                st.caption("🔄 Running both **Tomofast-x** and **SimPEG** (selected in Setup)")
+            elif use_simpeg:
+                st.caption("🔬 Running **SimPEG** (selected in Setup)")
+            elif use_tomo:
+                st.caption("⚡ Running **Tomofast-x** (selected in Setup)")
+            else:
+                st.warning("⚠️ No algorithm selected. Go to Setup to select Tomofast-x and/or SimPEG.")
             with st.expander("📋 Generated Parfile Details (preview)", expanded=False):
                 if dataset is not None:
                     n_pts = len(dataset)
@@ -855,19 +865,29 @@ def render_run_page():
         if run_mode == "active_data":
             # Prepare data dynamically and run
             n_iters = st.session_state.get("active_n_iters", 10)
-            with st.spinner("Preparing data and generating Parfile..."):
-                # Override n_iterations in prepare
-                from skills.tomofast.run_preparation import prepare_inversion
-                dataset = st.session_state.get("dataset")
-                if dataset is not None:
-                    data_src = _get_data_source()
+            dataset = st.session_state.get("dataset")
+            use_tomo = st.session_state.get("use_tomofast", False)
+            use_simpeg_flag = st.session_state.get("use_simpeg", False)
+
+            if dataset is None:
+                st.error("No dataset in session. Please load data first.")
+                st.session_state.run_status = "failed"
+                st.rerun()
+                return
+
+            data_src = _get_data_source()
+            data_type_sel = st.session_state.get("active_data_type", "Gravity").lower()
+            reg_str = st.session_state.get("active_reg_strength", "Medium").lower()
+            config = st.session_state.get("config", {})
+
+            # Run Tomofast-x if selected
+            if use_tomo:
+                with st.spinner("Running Tomofast-x inversion..."):
+                    from skills.tomofast.run_preparation import prepare_inversion
                     run_label = "demo_gravity" if data_src == "demo" else "user_inversion"
                     mesh_spec = {"nx": 20, "ny": 20, "nz": 10, "cell_size": (50.0, 50.0, 50.0)} if data_src == "demo" else None
 
                     try:
-                        data_type_sel = st.session_state.get("active_data_type", "Gravity").lower()
-                        reg_str = st.session_state.get("active_reg_strength", "Medium").lower()
-                        config = st.session_state.get("config", {})
                         prep_result = prepare_inversion(
                             dataset=dataset,
                             data_type=data_type_sel,
@@ -881,20 +901,53 @@ def render_run_page():
                         )
                         parfile_to_run = prep_result["parfile_rel_path"]
                     except Exception as e:
-                        st.error(f"Failed to prepare inversion: {e}")
+                        st.error(f"Failed to prepare Tomofast-x inversion: {e}")
                         st.session_state.run_status = "failed"
                         st.rerun()
                         return
-                else:
-                    st.error("No dataset in session. Please load data first.")
-                    st.session_state.run_status = "failed"
-                    st.rerun()
-                    return
+
+                run_full_inversion(parfile_to_run)
+
+            # Run SimPEG if selected
+            if use_simpeg_flag:
+                with st.spinner("Running SimPEG inversion..."):
+                    from skills.simpeg.run_preparation import prepare_and_run_inversion as simpeg_run
+                    try:
+                        simpeg_result = simpeg_run(
+                            dataset=dataset,
+                            data_type=data_type_sel,
+                            n_iterations=n_iters,
+                            reg_strength=reg_str,
+                            mag_inclination=config.get("inclination", -60.0),
+                            mag_declination=config.get("declination", 0.0),
+                            mag_intensity=config.get("field_strength", 0.0),
+                        )
+                        if simpeg_result["success"]:
+                            st.session_state.results_simpeg = {
+                                "model": simpeg_result["model"],
+                                "misfit_history": simpeg_result["misfit_history"],
+                                "iterations": simpeg_result["iterations"],
+                                "final_misfit": simpeg_result["final_misfit"],
+                                "runtime": simpeg_result["runtime"],
+                                "parsed": simpeg_result["parsed"],
+                            }
+                            if not use_tomo:
+                                # Only SimPEG — set as completed
+                                st.session_state.run_status = "completed"
+                        else:
+                            st.error(f"SimPEG failed: {simpeg_result.get('error', 'Unknown error')}")
+                            if not use_tomo:
+                                st.session_state.run_status = "failed"
+                    except Exception as e:
+                        st.error(f"SimPEG error: {e}")
+                        if not use_tomo:
+                            st.session_state.run_status = "failed"
+
+            st.rerun()
         else:
             parfile_to_run = st.session_state.get("selected_parfile", "")
-
-        run_full_inversion(parfile_to_run)
-        st.rerun()
+            run_full_inversion(parfile_to_run)
+            st.rerun()
 
     # --- Results Section ---
     if run_status == "completed" and st.session_state.get("results_tomofast"):
