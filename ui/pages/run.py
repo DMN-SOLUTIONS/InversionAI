@@ -68,11 +68,14 @@ def parse_costs_file(costs_path: str) -> list[float]:
                 if line.startswith("#") or not line:
                     continue
                 parts = line.split()
-                if len(parts) >= 2:
+                if len(parts) >= 3:
                     try:
                         iteration = int(parts[0])
                         data_cost_grav = float(parts[1])
-                        costs.append(data_cost_grav)
+                        data_cost_mag = float(parts[2])
+                        # Use whichever is non-zero (gravity or magnetic)
+                        cost = data_cost_mag if data_cost_grav == 0.0 else data_cost_grav
+                        costs.append(cost)
                     except (ValueError, IndexError):
                         continue
     except FileNotFoundError:
@@ -379,6 +382,8 @@ def _load_result_model_3d(results: dict) -> np.ndarray | None:
     # Find model file
     model_path = os.path.join(output_dir, "model", "grav_final_model_full.txt")
     if not os.path.exists(model_path):
+        model_path = os.path.join(output_dir, "model", "mag_final_model_full.txt")
+    if not os.path.exists(model_path):
         model_dir = os.path.join(output_dir, "model")
         if os.path.exists(model_dir):
             candidates = [f for f in os.listdir(model_dir) if "model" in f and f.endswith(".txt")]
@@ -487,7 +492,7 @@ def _render_run_slice(slice_data: np.ndarray, title: str, xlabel: str, ylabel: s
         ),
         line=dict(width=1, color="black"),
         ncontours=20,
-        colorbar=dict(title="Density (kg/m³)", thickness=15, len=0.9),
+        colorbar=dict(title="Susceptibility (SI)" if st.session_state.get("active_data_type", "Gravity").lower() == "magnetic" else "Density (kg/m³)", thickness=15, len=0.9),
         hovertemplate=f"{xlabel}: %{{x}}<br>{ylabel}: %{{y}}<br>Density: %{{z:.4f}}<extra></extra>",
     ))
     fig.update_layout(
@@ -512,6 +517,37 @@ def _get_data_source() -> str:
     return "user"
 
 
+def _detect_data_type() -> str:
+    """Auto-detect whether data is gravity or magnetic based on file name, format, and columns.
+
+    Returns 'gravity' or 'magnetic'.
+    """
+    uploaded_file = st.session_state.get("uploaded_file", "")
+    data_format = st.session_state.get("data_format", "")
+    dataset = st.session_state.get("dataset")
+
+    # Check file name
+    name_lower = uploaded_file.lower()
+    if "mag" in name_lower or "tmi" in name_lower or "suscept" in name_lower:
+        return "magnetic"
+    if "grav" in name_lower or "bouger" in name_lower or "density" in name_lower:
+        return "gravity"
+
+    # Check format
+    if "magnetic" in data_format.lower():
+        return "magnetic"
+
+    # Check column names
+    if dataset is not None:
+        for col in dataset.columns:
+            cl = col.lower()
+            if "mag" in cl or "tmi" in cl or "suscept" in cl:
+                return "magnetic"
+
+    # Default
+    return "gravity"
+
+
 def _prepare_active_data_inversion() -> dict | None:
     """Prepare inversion files from the active dataset (demo or user-uploaded).
 
@@ -534,12 +570,19 @@ def _prepare_active_data_inversion() -> dict | None:
         mesh_spec = None  # auto-generate from data extent
 
     try:
+        data_type_sel = st.session_state.get("active_data_type", "Gravity").lower()
+        reg_str = st.session_state.get("active_reg_strength", "Medium").lower()
+        config = st.session_state.get("config", {})
         result = prepare_inversion(
             dataset=dataset,
-            data_type="gravity",
+            data_type=data_type_sel,
             n_iterations=10,
             mesh_spec=mesh_spec,
             run_label=run_label,
+            reg_strength=reg_str,
+            mag_inclination=config.get("inclination", -60.0),
+            mag_declination=config.get("declination", 0.0),
+            mag_intensity=config.get("field_strength", 0.0),
         )
         return result
     except Exception as e:
@@ -654,14 +697,23 @@ def render_run_page():
             st.markdown("#### ⚙️ Inversion Parameters")
             col1, col2, col3 = st.columns([2, 2, 2])
             with col1:
-                n_iters = st.number_input("Major Iterations", min_value=1, max_value=100, value=10, key="active_iters")
+                n_iters = st.number_input("Major Iterations", min_value=1, max_value=200, value=30, key="active_iters")
             with col2:
-                if data_source == "demo":
-                    st.metric("Mesh", "20 × 20 × 10 (known)")
-                else:
-                    st.metric("Mesh", "Auto-generated")
+                reg_strength = st.select_slider(
+                    "Regularization",
+                    options=["Weak", "Medium", "Strong"],
+                    value="Medium",
+                    key="active_reg_strength",
+                    help="Weak = fits data better (risk overfitting). Strong = smoother model (risk underfitting).",
+                )
             with col3:
-                st.metric("Data Type", "Gravity")
+                detected_type = _detect_data_type()
+                data_type_choice = st.selectbox(
+                    "Data Type",
+                    options=["Gravity", "Magnetic"],
+                    index=0 if detected_type == "gravity" else 1,
+                    key="active_data_type",
+                )
 
             # Expandable details: show what will be generated
             with st.expander("📋 Generated Parfile Details (preview)", expanded=False):
@@ -725,6 +777,9 @@ def render_run_page():
                         st.session_state.start_time = datetime.now()
                         st.session_state.run_mode = "active_data"
                         st.session_state.active_n_iters = n_iters
+                        # Clear old results
+                        st.session_state.results_tomofast = None
+                        st.session_state.misfit_history_tomofast = []
                         st.rerun()
             with run_col2:
                 if run_status == "completed":
@@ -810,12 +865,19 @@ def render_run_page():
                     mesh_spec = {"nx": 20, "ny": 20, "nz": 10, "cell_size": (50.0, 50.0, 50.0)} if data_src == "demo" else None
 
                     try:
+                        data_type_sel = st.session_state.get("active_data_type", "Gravity").lower()
+                        reg_str = st.session_state.get("active_reg_strength", "Medium").lower()
+                        config = st.session_state.get("config", {})
                         prep_result = prepare_inversion(
                             dataset=dataset,
-                            data_type="gravity",
+                            data_type=data_type_sel,
                             n_iterations=n_iters,
                             mesh_spec=mesh_spec,
                             run_label=run_label,
+                            reg_strength=reg_str,
+                            mag_inclination=config.get("inclination", -60.0),
+                            mag_declination=config.get("declination", 0.0),
+                            mag_intensity=config.get("field_strength", 0.0),
                         )
                         parfile_to_run = prep_result["parfile_rel_path"]
                     except Exception as e:

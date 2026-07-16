@@ -345,12 +345,21 @@ def _render_model_cross_sections(results):
     import os
     import re
 
+    # Determine model property label based on data type
+    data_type = st.session_state.get("active_data_type", "Gravity")
+    if data_type.lower() == "magnetic":
+        model_label = "Susceptibility (SI)"
+    else:
+        model_label = "Density (kg/m³)"
+
     output_dir = results.get("output_dir", "")
     if not output_dir or not os.path.exists(output_dir):
         return
 
     # Load model
     model_path = os.path.join(output_dir, "model", "grav_final_model_full.txt")
+    if not os.path.exists(model_path):
+        model_path = os.path.join(output_dir, "model", "mag_final_model_full.txt")
     if not os.path.exists(model_path):
         model_dir = os.path.join(output_dir, "model")
         if os.path.exists(model_dir):
@@ -431,7 +440,7 @@ def _render_model_cross_sections(results):
     fig.add_trace(go.Heatmap(
         z=slice_data.T,
         colorscale="RdBu_r",
-        colorbar=dict(title="Density", thickness=12),
+        colorbar=dict(title=model_label, thickness=12),
     ))
     fig.update_layout(
         title=f"Depth Slice Z={slice_z}",
@@ -448,7 +457,7 @@ def _render_model_cross_sections(results):
     fig.add_trace(go.Heatmap(
         z=slice_data.T,
         colorscale="RdBu_r",
-        colorbar=dict(title="Density", thickness=12),
+        colorbar=dict(title=model_label, thickness=12),
     ))
     fig.update_layout(
         title=f"X-Section X={slice_x}",
@@ -464,7 +473,7 @@ def _render_model_cross_sections(results):
     fig.add_trace(go.Heatmap(
         z=slice_data.T,
         colorscale="RdBu_r",
-        colorbar=dict(title="Density", thickness=12),
+        colorbar=dict(title=model_label, thickness=12),
     ))
     fig.update_layout(
         title=f"Y-Section Y={slice_y}",

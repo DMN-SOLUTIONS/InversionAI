@@ -389,51 +389,67 @@ def _load_demo_data(demo_key: str = "gravity_simple"):
 
 
 def _parse_binary_gif(raw_bytes: bytes, filename: str) -> pd.DataFrame:
-    """Parse a binary GIF grid file into a DataFrame with X, Y, Z, Value columns.
+    """Parse a binary GIF file into a DataFrame with X, Y, Z, Value columns.
 
-    Binary GIF format:
-        Bytes 0-3: int32 nx (number of grid points in X)
-        Bytes 4-7: int32 ny (number of grid points in Y)
-        Bytes 8-39: grid parameters (padding/metadata)
-        Bytes 40+: nx*ny float64 values (gravity data)
-
-    Since the binary file doesn't contain explicit coordinates, we generate
-    them from the grid dimensions. The user can adjust origin/spacing in
-    the configuration step.
+    Supports two binary formats:
+    1. Grid format: int32(nx), int32(ny), 32-byte header, nx*ny float64 values
+    2. Observation format: int32(1), int32(n_data), float64(easting), float64(northing_start),
+       float64(spacing), float64(?), n_data float64 values (1D profile at regular spacing)
     """
     import struct
 
+    if len(raw_bytes) < 16:
+        return None
+
     try:
-        nx = struct.unpack('<i', raw_bytes[0:4])[0]
-        ny = struct.unpack('<i', raw_bytes[4:8])[0]
+        i1 = struct.unpack('<i', raw_bytes[0:4])[0]
+        i2 = struct.unpack('<i', raw_bytes[4:8])[0]
 
-        # Read data values
-        values = np.frombuffer(raw_bytes[40:40 + nx * ny * 8], dtype='<f8')
+        # Format 1: Grid (nx > 10, ny > 10, file_size ≈ 40 + nx*ny*8)
+        expected_grid_size = 40 + i1 * i2 * 8
+        if (10 < i1 < 10000 and 10 < i2 < 10000
+                and abs(len(raw_bytes) - expected_grid_size) < 100):
+            # Grid format
+            nx, ny = i1, i2
+            values = np.frombuffer(raw_bytes[40:40 + nx * ny * 8], dtype='<f8')
+            if len(values) != nx * ny:
+                return None
+            dx = 500.0
+            dy = 500.0
+            x_coords = np.arange(nx) * dx
+            y_coords = np.arange(ny) * dy
+            xx, yy = np.meshgrid(x_coords, y_coords, indexing='ij')
+            return pd.DataFrame({
+                "X": xx.flatten(), "Y": yy.flatten(),
+                "Z": np.zeros(nx * ny), "Value": values,
+            })
 
-        if len(values) != nx * ny:
-            return None
+        # Format 2: Observation profile (i1=1, i2=n_data, then metadata + values)
+        # Structure: int32(1), int32(n_data), f64(easting), f64(northing_start), f64(spacing), f64(?), n_data*f64(values)
+        expected_obs_size = 8 + 4 * 8 + i2 * 8  # 8 header + 4 metadata doubles + n_data doubles
+        if (i1 == 1 and 10 < i2 < 10000
+                and abs(len(raw_bytes) - expected_obs_size) < 100):
+            n_data = i2
+            # Read metadata
+            easting = struct.unpack('<d', raw_bytes[8:16])[0]
+            northing_start = struct.unpack('<d', raw_bytes[16:24])[0]
+            spacing = struct.unpack('<d', raw_bytes[24:32])[0]
+            # Read data values starting at offset 40 (8 + 4*8 = 40)
+            data_offset = 40
+            values = np.frombuffer(raw_bytes[data_offset:data_offset + n_data * 8], dtype='<f8')
+            if len(values) != n_data:
+                return None
 
-        # Generate coordinates - use grid indices scaled by assumed 500m spacing
-        # (This is a common spacing for regional gravity surveys)
-        # Users can see these in the preview and adjust if needed
-        dx = 500.0  # default spacing in meters
-        dy = 500.0
+            # Generate station coordinates (regular spacing along Northing)
+            northings = northing_start + np.arange(n_data) * spacing
+            eastings = np.full(n_data, easting)
 
-        # Create coordinate grid (X varies fastest in the binary storage)
-        x_coords = np.arange(nx) * dx
-        y_coords = np.arange(ny) * dy
+            return pd.DataFrame({
+                "X": eastings, "Y": northings,
+                "Z": np.zeros(n_data), "Value": values,
+            })
 
-        # Expand to full grid
-        xx, yy = np.meshgrid(x_coords, y_coords, indexing='ij')
-
-        df = pd.DataFrame({
-            "X": xx.flatten(),
-            "Y": yy.flatten(),
-            "Z": np.zeros(nx * ny),
-            "Value": values,
-        })
-
-        return df
+        return None
 
     except Exception:
         return None
@@ -493,18 +509,23 @@ def render_setup_page():
         # Read and detect format - try multiple encodings
         raw_bytes = uploaded_file.getvalue()
 
-        # Check if this is a binary file (GIF grid format)
+        # Check if this is a binary file (GIF grid or observation format)
         is_binary = False
         if len(raw_bytes) > 40:
-            # Binary GIF: first 8 bytes are two int32 (nx, ny), followed by grid data
             import struct
             try:
-                nx_test = struct.unpack('<i', raw_bytes[0:4])[0]
-                ny_test = struct.unpack('<i', raw_bytes[4:8])[0]
-                expected_size = 40 + nx_test * ny_test * 8
-                if (10 < nx_test < 10000 and 10 < ny_test < 10000
-                        and abs(len(raw_bytes) - expected_size) < 100):
-                    is_binary = True
+                i1 = struct.unpack('<i', raw_bytes[0:4])[0]
+                i2 = struct.unpack('<i', raw_bytes[4:8])[0]
+                # Grid format: nx*ny*8 + 40 ≈ file_size
+                expected_grid = 40 + i1 * i2 * 8
+                # Observation format: 8 + 4*8 + i2*8 ≈ file_size
+                expected_obs = 8 + 4 * 8 + i2 * 8
+                if ((10 < i1 < 10000 and 10 < i2 < 10000 and abs(len(raw_bytes) - expected_grid) < 100)
+                        or (i1 == 1 and 10 < i2 < 10000 and abs(len(raw_bytes) - expected_obs) < 100)):
+                    # Verify first byte is non-text (binary files don't start with printable ASCII)
+                    first_byte = raw_bytes[0]
+                    if not (32 <= first_byte <= 126):
+                        is_binary = True
             except (struct.error, ValueError):
                 pass
 
@@ -567,8 +588,10 @@ def render_setup_page():
                 all_critical = validation["has_coordinates"] and validation["sufficient_points"]
                 st.session_state.data_validated = all_critical
             else:
-                st.error("Failed to parse binary GIF file.")
-        else:
+                # Binary parsing failed — try as text instead
+                is_binary = False
+
+        if not is_binary:
             # Text-based file
             content = None
             for encoding in ["utf-8", "latin-1", "ascii", "cp1252"]:

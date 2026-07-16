@@ -59,6 +59,8 @@ def _load_model_3d(results: dict) -> np.ndarray | None:
     # Find model file
     model_path = os.path.join(output_dir, "model", "grav_final_model_full.txt")
     if not os.path.exists(model_path):
+        model_path = os.path.join(output_dir, "model", "mag_final_model_full.txt")
+    if not os.path.exists(model_path):
         model_dir = os.path.join(output_dir, "model")
         if os.path.exists(model_dir):
             candidates = [f for f in os.listdir(model_dir) if "model" in f and f.endswith(".txt")]
@@ -278,6 +280,8 @@ def render_model_histogram(results_tomo):
         return
 
     model_path = os.path.join(output_dir, "model", "grav_final_model_full.txt")
+    if not os.path.exists(model_path):
+        model_path = os.path.join(output_dir, "model", "mag_final_model_full.txt")
     if not os.path.exists(model_path):
         # Try finding any model file
         model_dir = os.path.join(output_dir, "model")
@@ -812,7 +816,7 @@ def _render_3d_model(model: np.ndarray, title: str):
         colorscale='RdBu_r',
         caps=dict(x_show=True, y_show=True, z_show=True),
         opacity=opacity_val,
-        colorbar=dict(title="Density (kg/m³)", thickness=20, len=0.7),
+        colorbar=dict(title="Susceptibility (SI)" if st.session_state.get("active_data_type", "Gravity").lower() == "magnetic" else "Density (kg/m³)", thickness=20, len=0.7),
         hovertemplate="X: %{x}<br>Y: %{y}<br>Z: %{z}<br>Value: %{value:.4f}<extra></extra>",
     ))
 
@@ -862,7 +866,7 @@ def _render_3d_sections(model: np.ndarray, title: str):
         surfacecolor=z_slice,
         colorscale='RdBu_r', cmin=vmin, cmax=vmax,
         showscale=True,
-        colorbar=dict(title="Density (kg/m³)", thickness=20, len=0.7, x=1.02),
+        colorbar=dict(title="Susceptibility (SI)" if st.session_state.get("active_data_type", "Gravity").lower() == "magnetic" else "Density (kg/m³)", thickness=20, len=0.7, x=1.02),
         opacity=sec_opacity,
         name=f"Z={sec_z}",
         hovertemplate="X: %{x}<br>Y: %{y}<br>Z: %{z}<br>Value: %{surfacecolor:.4f}<extra>Z-plane</extra>",
@@ -952,7 +956,7 @@ def _render_slice(model: np.ndarray, title: str, idx: int, axis: str = "z"):
         ),
         line=dict(width=1, color="black"),
         ncontours=20,
-        colorbar=dict(title="Density (kg/m³)", thickness=15, len=0.9),
+        colorbar=dict(title="Susceptibility (SI)" if st.session_state.get("active_data_type", "Gravity").lower() == "magnetic" else "Density (kg/m³)", thickness=15, len=0.9),
         hovertemplate=f"{xlabel}: %{{x}}<br>{ylabel}: %{{y}}<br>Density: %{{z:.4f}}<extra></extra>",
     ))
 

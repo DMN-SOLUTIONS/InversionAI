@@ -21,9 +21,13 @@ WORKING_DIR = os.path.join(TOMOFAST_DIR, "workspace")
 def prepare_inversion(
     dataset: pd.DataFrame,
     data_type: str = "gravity",
-    n_iterations: int = 10,
+    n_iterations: int = 30,
     mesh_spec: Optional[dict] = None,
     run_label: str = "user_run",
+    reg_strength: str = "medium",
+    mag_inclination: float = -60.0,
+    mag_declination: float = 0.0,
+    mag_intensity: float = 0.0,
 ) -> dict:
     """Prepare all files needed for a Tomofast-x inversion from a DataFrame.
 
@@ -39,6 +43,10 @@ def prepare_inversion(
         n_iterations: Number of major iterations
         mesh_spec: Optional dict with mesh parameters. If None, auto-generates from data.
         run_label: Label for this run (used in folder naming)
+        reg_strength: 'weak', 'medium', or 'strong' regularization
+        mag_inclination: Magnetic field inclination in degrees (for magnetic inversions)
+        mag_declination: Magnetic field declination in degrees (for magnetic inversions)
+        mag_intensity: Magnetic field intensity in nT (0 = use Tomofast-x defaults)
 
     Returns:
         dict with keys:
@@ -58,6 +66,10 @@ def prepare_inversion(
     # Output directory (relative to TOMOFAST_DIR for Parfile)
     output_rel = f"workspace/{run_label}/output/"
     output_abs = os.path.join(TOMOFAST_DIR, output_rel)
+    # Clean old output to prevent stale model files from previous runs
+    import shutil
+    if os.path.exists(output_abs):
+        shutil.rmtree(output_abs)
     os.makedirs(output_abs, exist_ok=True)
     os.makedirs(os.path.join(output_abs, "model"), exist_ok=True)
     os.makedirs(os.path.join(output_abs, "data"), exist_ok=True)
@@ -77,22 +89,13 @@ def prepare_inversion(
         cell_size = mesh_spec.get("cell_size", None)
         _write_mesh_file(dataset, mesh_file_abs, nx, ny, nz, origin, cell_size)
     else:
-        nx, ny, nz = _auto_mesh_dims(dataset)
-        _write_mesh_file(dataset, mesh_file_abs, nx, ny, nz)
+        nx, ny, nz, auto_cell_size = _auto_mesh_dims(dataset)
+        _write_mesh_file(dataset, mesh_file_abs, nx, ny, nz, cell_size=auto_cell_size)
 
     mesh_file_rel = os.path.relpath(mesh_file_abs, TOMOFAST_DIR)
     n_cells = nx * ny * nz
 
     # --- Step 3: Generate Parfile ---
-    # Compute data amplitude for auto-scaling regularization
-    if "Value" in dataset.columns:
-        val_col = dataset["Value"].dropna()
-    else:
-        # Find value column
-        non_coord = [c for c in dataset.columns if c not in ("X", "Y", "Z")]
-        val_col = dataset[non_coord[0]].dropna() if non_coord else pd.Series([1.0])
-    data_amplitude = float(val_col.abs().max()) if len(val_col) > 0 else 1.0
-
     parfile_abs = os.path.join(run_dir, f"Parfile_{run_label}.txt")
     _write_parfile(
         parfile_path=parfile_abs,
@@ -104,7 +107,10 @@ def prepare_inversion(
         grid_dims=(nx, ny, nz),
         n_iterations=n_iterations,
         run_label=run_label,
-        data_amplitude=data_amplitude,
+        reg_strength=reg_strength,
+        mag_inclination=mag_inclination,
+        mag_declination=mag_declination,
+        mag_intensity=mag_intensity,
     )
     parfile_rel = os.path.relpath(parfile_abs, TOMOFAST_DIR)
 
@@ -163,10 +169,24 @@ def _write_observation_file(dataset: pd.DataFrame, output_path: str) -> int:
     with open(output_path, "w") as f:
         # First line: number of observations
         f.write(f"{n_data:>12d}\n")
-        # Data lines: Y X Z value (Tomofast-x convention: northing first, easting second)
+        # Data lines: Tomofast-x expects Northing(larger), Easting(smaller), Z, value
+        # Determine which is Northing vs Easting based on coordinate magnitude
+        x_mean = np.nanmean(x)
+        y_mean = np.nanmean(y)
+        if y_mean > x_mean:
+            # Y is Northing (larger), X is Easting (smaller) - standard convention
+            coord1 = y  # Northing first
+            coord2 = x  # Easting second
+        else:
+            # X is Northing (larger), Y is Easting (smaller) - swapped
+            coord1 = x  # Northing first
+            coord2 = y  # Easting second
+
+        # Add tiny perturbation (0.1m) to coordinates to prevent exact mesh boundary coincidence
+        perturb = 0.1
         for i in range(n_data):
             f.write(
-                f"   {y[i]:20.10f}   {x[i]:20.10f}   {z[i]:20.10f}   "
+                f"   {coord1[i]+perturb:20.10f}   {coord2[i]+perturb:20.10f}   {z[i]:20.10f}   "
                 f"{values[i]:24.16E}\n"
             )
 
@@ -205,23 +225,20 @@ def _auto_mesh_dims(dataset: pd.DataFrame) -> Tuple[int, int, int]:
         dy_spacing = y_range / 10.0 if y_range > 0 else 1000.0
 
     if is_profile_x:
-        # Profile along X: use dx_spacing for along-profile, create perpendicular extent
-        cell_size = dx_spacing
-        nx = max(5, int(np.ceil(x_range / cell_size)))
-        # Perpendicular: ~10% of profile length, minimum 10 cells
-        perp_extent = x_range * 0.1
-        ny = max(10, int(np.ceil(perp_extent / cell_size)))
-        # Depth: ~30% of profile length
-        depth_extent = x_range * 0.3
-        nz = max(10, int(np.ceil(depth_extent / cell_size)))
+        # Profile along X: match Hamersley-proven design
+        cell_along = dx_spacing * 0.84
+        nx = max(5, int(np.ceil(x_range / cell_along)))
+        ny = 13  # across-strike cells
+        # Depth: match Hamersley ratio (745/1000 = 0.745 of spacing)
+        cell_depth = dx_spacing * 0.745
+        nz = 33  # Hamersley depth layers
     elif is_profile_y:
-        # Profile along Y: use dy_spacing for along-profile
-        cell_size = dy_spacing
-        ny = max(5, int(np.ceil(y_range / cell_size)))
-        perp_extent = y_range * 0.1
-        nx = max(10, int(np.ceil(perp_extent / cell_size)))
-        depth_extent = y_range * 0.3
-        nz = max(10, int(np.ceil(depth_extent / cell_size)))
+        # Profile along Y: same convention as profile_x (nx=along, ny=across)
+        cell_along = dy_spacing * 0.84
+        nx = max(5, int(np.ceil(y_range / cell_along)))  # along-profile
+        ny = 13  # across-strike
+        cell_depth = dy_spacing * 0.745
+        nz = 33
     else:
         # 2D survey: use minimum spacing
         cell_size = min(dx_spacing, dy_spacing)
@@ -245,7 +262,22 @@ def _auto_mesh_dims(dataset: pd.DataFrame) -> Tuple[int, int, int]:
         ny = max(5, int(ny * scale))
         nz = max(5, int(nz * scale))
 
-    return nx, ny, nz
+    # Compute actual cell sizes to pass to mesh writer
+    # Convention: dx=along-profile, dy=across-strike, dz=depth
+    if is_profile_x:
+        dx = cell_along
+        dy = 3000.0  # across-strike: Hamersley standard
+        dz = cell_depth
+    elif is_profile_y:
+        dx = cell_along  # along-profile (Y direction)
+        dy = 3000.0  # across-strike (X direction)
+        dz = cell_depth
+    else:
+        dx = x_range / nx if x_range > 0 and nx > 0 else 1000.0
+        dy = y_range / ny if y_range > 0 and ny > 0 else 1000.0
+        dz = depth_extent / nz if nz > 0 else 500.0
+
+    return nx, ny, nz, (dx, dy, dz)
 
 
 def _write_mesh_file(
@@ -263,61 +295,93 @@ def _write_mesh_file(
         Line 1: N_cells (total)
         Lines 2+: y1 y2 x1 x2 z1 z2 ix iy iz
 
-    Cell ordering: ix fastest, iy middle, iz slowest (column-major in x).
+    Tomofast-x convention: first pair = Northing (larger), second pair = Easting (smaller)
+    Cell ordering: ix fastest, iy middle, iz slowest.
     Z is positive downward (surface = 0, depth > 0).
     """
     x = dataset["X"].values
     y = dataset["Y"].values
 
-    x_min, x_max = x.min(), x.max()
-    y_min, y_max = y.min(), y.max()
-    x_range = x_max - x_min
-    y_range = y_max - y_min
+    # Determine which is Northing (larger) vs Easting (smaller)
+    x_mean = np.nanmean(x)
+    y_mean = np.nanmean(y)
+    if y_mean > x_mean:
+        # Y=Northing (along-profile for Hamersley-type), X=Easting
+        northing = y
+        easting = x
+    else:
+        # X=Northing, Y=Easting (swapped in CSV)
+        northing = x
+        easting = y
+
+    n_min, n_max = northing.min(), northing.max()
+    e_min, e_max = easting.min(), easting.max()
+    n_range = n_max - n_min
+    e_range = e_max - e_min
 
     # Calculate cell sizes
+    # In Tomofast-x: first pair = Northing direction, second pair = Easting direction
+    # nx in our code = along-profile (Northing for Hamersley), ny = across-strike (Easting)
     if cell_size:
-        dx, dy, dz = cell_size
+        dx_along, dy_across, dz = cell_size
     else:
-        dx = x_range / nx if x_range > 0 and nx > 0 else 1000.0
-        dy = y_range / ny if y_range > 0 and ny > 0 else dx  # if no Y range, use same as X
-        # Depth extent = half of max horizontal range (or profile length * 0.3)
-        max_range = max(x_range, y_range)
+        dx_along = n_range / nx if n_range > 0 and nx > 0 else 1000.0
+        dy_across = e_range / ny if e_range > 0 and ny > 0 else dx_along
+        max_range = max(n_range, e_range)
         if max_range == 0:
             max_range = 10000.0
-        depth_extent = max_range * 0.3 if min(x_range, y_range) < 1.0 else max_range * 0.5
+        depth_extent = max_range * 0.3 if min(n_range, e_range) < 1.0 else max_range * 0.5
         dz = depth_extent / nz if nz > 0 else 50.0
 
-    # Origin: top-southwest corner with small buffer
+    # Origin
     if origin:
         x0, y0, z0 = origin
     else:
-        x0 = x_min - dx * 0.5  # half-cell buffer
-        if y_range < 1.0:
-            # Profile along X: center Y around the station Y
-            y0 = y_min - (ny * dy) / 2.0
+        perturb = 3.14159265358979
+
+        if e_range < 1.0:
+            # Profile along Northing: station Easting is constant
+            e_station = e_min
+            e0 = e_station - (ny // 2) * dy_across - dy_across / 2.0 + perturb
+            n0 = n_min - dx_along / 2.0 + perturb
+        elif n_range < 1.0:
+            # Profile along Easting: station Northing is constant
+            n_station = n_min
+            n0 = n_station - (nx // 2) * dx_along - dx_along / 2.0 + perturb
+            e0 = e_min - dy_across / 2.0 + perturb
         else:
-            y0 = y_min - dy * 0.5
-        z0 = 0.0  # surface level
+            n0 = n_min - dx_along / 2.0 + perturb
+            e0 = e_min - dy_across / 2.0 + perturb
+        z0 = 0.0
 
     n_cells = nx * ny * nz
 
     with open(output_path, "w") as f:
         f.write(f"{n_cells}\n")
 
-        # Tomofast-x mesh: iterate iz (slowest), then iy, then ix (fastest)
-        # Format: y1 y2 x1 x2 z1 z2 ix iy iz
+        # Generate depth layers with mild expansion
+        dz_layers = []
+        current_dz = dz
         for iz in range(nz):
-            z1 = z0 + iz * dz
-            z2 = z0 + (iz + 1) * dz
-            for iy in range(ny):
-                y1 = y0 + iy * dy
-                y2 = y0 + (iy + 1) * dy
-                for ix in range(nx):
-                    x1 = x0 + ix * dx
-                    x2 = x0 + (ix + 1) * dx
+            dz_layers.append(current_dz)
+            current_dz = min(current_dz * 1.1, dz * 2.0)
+
+        # Tomofast-x mesh format: Northing1 Northing2 Easting1 Easting2 Z1 Z2 ix iy iz
+        # Matching Hamersley convention: ix=across-strike (Easting), iy=along-profile (Northing), iz=depth
+        z_top = z0
+        for iz in range(nz):
+            z1 = z_top
+            z2 = z_top + dz_layers[iz]
+            z_top = z2
+            for iy in range(nx):  # iy = along-profile (Northing), nx cells
+                n1 = n0 + iy * dx_along
+                n2 = n0 + (iy + 1) * dx_along
+                for ix in range(ny):  # ix = across-strike (Easting), ny cells
+                    e1 = e0 + ix * dy_across
+                    e2 = e0 + (ix + 1) * dy_across
                     f.write(
-                        f"{y1:.4e} {y2:.4e} {x1:.4e} {x2:.4e} "
-                        f"{z1} {z2:.2f} {ix+1} {iy+1} {iz+1}\n"
+                        f"{n1:.4e} {n2:.4e} {e1:.4e} {e2:.4e} "
+                        f"{z1:.2f} {z2:.2f} {ix+1} {iy+1} {iz+1}\n"
                     )
 
 
@@ -331,22 +395,62 @@ def _write_parfile(
     grid_dims: Tuple[int, int, int],
     n_iterations: int,
     run_label: str,
-    data_amplitude: float = 1.0,
+    reg_strength: str = "medium",
+    mag_inclination: float = -60.0,
+    mag_declination: float = 0.0,
+    mag_intensity: float = 55000.0,
 ) -> None:
     """Write a Tomofast-x Parfile matching the format used by the actual binary.
 
-    Based on the working Hamersley Parfile format.
+    Based on the working Hamersley Parfile format for both gravity and magnetic.
     Regularization weights are auto-scaled based on data amplitude to ensure convergence.
     """
     nx, ny, nz = grid_dims
     data_prefix = "grav" if data_type == "gravity" else "magn"
     description = f"InversionAI {data_type} inversion ({run_label})"
 
-    # Regularization weights: use the same values as the Hamersley reference
-    # which is a well-tuned gravity inversion. These values work for general
-    # gravity inversions because Tomofast-x normalizes the data cost.
-    damping_weight = 1.0e-06
-    smoothing_weight = 9.0e-05
+    # Regularization strength multiplier
+    # Weak = 0.3x (fits data better), Medium = 1.0x, Strong = 3.0x (smoother)
+    reg_multiplier = {"weak": 0.3, "medium": 1.0, "strong": 3.0}.get(reg_strength.lower(), 1.0)
+
+    # Regularization weights from Hamersley reference, scaled by reg_strength
+    if data_type == "gravity":
+        depth_power = "2.0d0"
+        damp = 1.0e-06 * reg_multiplier
+        smooth = 9.0e-05 * reg_multiplier
+        damping_weight = f"{damp:.1e}"
+        smoothing_weight = f"{smooth:.1e}"
+        grav_problem_weight = "1.d0"
+        magn_problem_weight = "0.d0"
+        gradient_section = f"""inversion.dampingGradient.weightType     = 1
+inversion.dampingGradient.grav.weight    = {smoothing_weight}
+inversion.dampingGradient.magn.weight    = 0.d0"""
+    else:
+        depth_power = "3.0d0"
+        damp = 2.8e3 * reg_multiplier
+        smooth = 3.93e5 * reg_multiplier
+        damping_weight = f"{damp:.2e}"
+        smoothing_weight = f"{smooth:.2e}"
+        grav_problem_weight = "0.d0"
+        magn_problem_weight = "1.d0"
+        gradient_section = f"""inversion.dampingGradient.weightType     = 1
+inversion.dampingGradient.magn.weight    = {smoothing_weight}"""
+
+    # Magnetic field section - only include if user explicitly provides field parameters
+    # When omitted, Tomofast-x uses internal defaults that generally work well
+    # Signal to include: mag_intensity > 0 AND explicitly passed by user
+    if data_type == "magnetic" and mag_intensity > 0:
+        mag_field_section = f"""===================================================================================
+MAGNETIC FIELD constants
+===================================================================================
+forward.magneticField.inclination            = {mag_inclination}
+forward.magneticField.declination            = {mag_declination}
+forward.magneticField.intensity_nT           = {mag_intensity}
+forward.magneticField.XaxisDeclination       = 0.d0
+
+"""
+    else:
+        mag_field_section = ""
 
     content = f"""===================================================================================
 GLOBAL
@@ -357,8 +461,8 @@ global.description          = {description}
 ===================================================================================
 MODEL GRID parameters
 ===================================================================================
-# nx ny nz
-modelGrid.size                      = {nx} {ny} {nz}
+# nx_across ny_along nz_depth
+modelGrid.size                      = {ny} {nx} {nz}
 modelGrid.{data_prefix}.file        = {mesh_file_rel}
 
 ===================================================================================
@@ -367,11 +471,11 @@ DATA parameters
 forward.data.{data_prefix}.nData             = {n_data}
 forward.data.{data_prefix}.dataGridFile      = {data_file_rel}
 
-===================================================================================
+{mag_field_section}===================================================================================
 DEPTH WEIGHTING
 ===================================================================================
 forward.depthWeighting.type         = 1
-forward.depthWeighting.{data_prefix}.power   = 2.0d0
+forward.depthWeighting.{data_prefix}.power   = {depth_power}
 
 ===================================================================================
 SENSITIVITY KERNEL
@@ -408,21 +512,19 @@ inversion.minResidual               = 1.d-13
 ===================================================================================
 MODEL DAMPING (m - m_prior)
 ===================================================================================
-inversion.modelDamping.{data_prefix}.weight  = {damping_weight:.1e}
+inversion.modelDamping.{data_prefix}.weight  = {damping_weight}
 inversion.modelDamping.normPower    = 2.0d0
 
 ===================================================================================
 DAMPING-GRADIENT constraints
 ===================================================================================
-inversion.dampingGradient.weightType     = 1
-inversion.dampingGradient.{data_prefix}.weight    = {smoothing_weight:.1e}
-inversion.dampingGradient.magn.weight    = 0.d0
+{gradient_section}
 
 ===================================================================================
 JOINT INVERSION parameters
 ===================================================================================
-inversion.joint.{data_prefix}.problemWeight  = 1.d0
-inversion.joint.magn.problemWeight  = 0.d0
+inversion.joint.grav.problemWeight  = {grav_problem_weight}
+inversion.joint.magn.problemWeight  = {magn_problem_weight}
 """
 
     with open(parfile_path, "w") as f:

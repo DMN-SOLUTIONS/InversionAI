@@ -22,10 +22,10 @@ def get_default_config(df) -> dict:
         "n_cells_y": 50,
         "n_cells_z": 25,
         "padding_cells": 5,
-        # Magnetic field parameters
+        # Magnetic field parameters (0 = use Tomofast-x internal defaults)
         "inclination": -60.0,
         "declination": 0.0,
-        "field_strength": 50000.0,
+        "field_strength": 0.0,
     }
 
     if df is not None and "X" in df.columns and "Y" in df.columns:
@@ -310,11 +310,11 @@ def render_configure_page():
     with mag_col3:
         config["field_strength"] = st.number_input(
             "Field Strength (nT)",
-            min_value=10000.0,
+            min_value=0.0,
             max_value=70000.0,
             value=float(config.get("field_strength", defaults["field_strength"])),
             format="%.0f",
-            help="Total magnetic field intensity in nanotesla.",
+            help="Total magnetic field intensity in nT. Set to 0 for automatic (recommended for most cases).",
         )
 
     st.markdown("---")
