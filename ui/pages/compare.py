@@ -59,6 +59,8 @@ def _load_model_3d(results: dict) -> np.ndarray | None:
     # Find model file
     model_path = os.path.join(output_dir, "model", "grav_final_model_full.txt")
     if not os.path.exists(model_path):
+        model_path = os.path.join(output_dir, "model", "mag_final_model_full.txt")
+    if not os.path.exists(model_path):
         model_dir = os.path.join(output_dir, "model")
         if os.path.exists(model_dir):
             candidates = [f for f in os.listdir(model_dir) if "model" in f and f.endswith(".txt")]
@@ -279,6 +281,8 @@ def render_model_histogram(results_tomo):
 
     model_path = os.path.join(output_dir, "model", "grav_final_model_full.txt")
     if not os.path.exists(model_path):
+        model_path = os.path.join(output_dir, "model", "mag_final_model_full.txt")
+    if not os.path.exists(model_path):
         # Try finding any model file
         model_dir = os.path.join(output_dir, "model")
         if os.path.exists(model_dir):
@@ -289,16 +293,27 @@ def render_model_histogram(results_tomo):
     if os.path.exists(model_path):
         model_values = _read_model_file(model_path)
         if model_values is not None and len(model_values) > 0:
+            # Determine property label based on data type
+            data_type = st.session_state.get("active_data_type", "Gravity").lower()
+            if data_type == "magnetic":
+                property_name = "Susceptibility"
+                property_unit = "SI"
+                hist_title = "Model Value Distribution (Magnetic Susceptibility)"
+            else:
+                property_name = "Density Contrast"
+                property_unit = "kg/m³"
+                hist_title = "Model Value Distribution (Density Contrast)"
+
             fig = go.Figure()
             fig.add_trace(go.Histogram(
                 x=model_values,
                 nbinsx=80,
-                name="Density Model",
+                name=f"{property_name} Model",
                 marker_color="#2563eb",
             ))
             fig.update_layout(
-                title="Model Value Distribution (Density Contrast)",
-                xaxis_title="Density (kg/m³)",
+                title=hist_title,
+                xaxis_title=f"{property_name} ({property_unit})",
                 yaxis_title="Count",
                 template="plotly_white",
                 height=350,
@@ -402,6 +417,19 @@ def render_compare_page():
     # Summary
     summary = generate_summary(results_tomo, results_simpeg)
     st.markdown(summary)
+
+    # Compression status for Tomofast-x
+    if results_tomo:
+        compression_type = results_tomo.get("compression_type", 0)
+        if compression_type == 1:
+            compression_rate = results_tomo.get("compression_rate", 0.15)
+            st.info(
+                f"🗜️ **Tomofast-x: Wavelet compression enabled** (rate: {compression_rate:.0%}) — "
+                f"auto-applied to fit in available memory."
+            )
+        else:
+            st.success("✅ **Tomofast-x: No compression** — full sensitivity matrix used.")
+
     st.markdown("---")
 
     # Metrics table
@@ -520,8 +548,9 @@ def render_compare_page():
     # AI Interpretation - Mineralization Leads
     if model_3d_tomo is not None or model_3d_simpeg is not None:
         model_interp = model_3d_tomo if model_3d_tomo is not None else model_3d_simpeg
+        data_type = st.session_state.get("active_data_type", "Gravity").lower()
         st.subheader("🧠 AI Geological Interpretation")
-        _render_interpretation(model_interp)
+        _render_interpretation(model_interp, data_type=data_type)
         st.markdown("---")
 
     # Output files
@@ -541,10 +570,62 @@ def render_compare_page():
         st.rerun()
 
 
-def _render_interpretation(model: np.ndarray):
-    """Generate AI interpretation of density model highlighting potential mineralization leads."""
+def _render_interpretation(model: np.ndarray, data_type: str = "gravity"):
+    """Route AI geological interpretation to the appropriate Senior Modeller agent."""
+    if data_type == "magnetic":
+        _interpret_magnetic(model)
+    else:
+        _interpret_gravity(model)
+
+
+def _interpret_gravity(model: np.ndarray):
+    """Senior Gravity Modeller — 10+ years expertise in 3D gravity inversion interpretation."""
+    _render_agent_badge("Senior Gravity Modeller", "gravity")
+    _render_common_interpretation(model, data_type="gravity")
+
+
+def _interpret_magnetic(model: np.ndarray):
+    """Senior Magnetic Modeller — 10+ years expertise in 3D magnetic inversion interpretation."""
+    _render_agent_badge("Senior Magnetic Modeller", "magnetic")
+    _render_common_interpretation(model, data_type="magnetic")
+
+
+def _render_agent_badge(agent_name: str, data_type: str):
+    """Display the specialist agent badge."""
+    if data_type == "magnetic":
+        icon = "🧲"
+        specialty = "Magnetic susceptibility modelling, structural interpretation, and mineral targeting"
+    else:
+        icon = "🌍"
+        specialty = "Density contrast modelling, geological body delineation, and resource targeting"
+
+    st.markdown(
+        f"> {icon} **Agent: {agent_name}**  \n"
+        f"> *Expertise:* {specialty}  \n"
+        f"> *Experience:* 10+ years in 3D potential field inversion & interpretation"
+    )
+
+
+def _render_common_interpretation(model: np.ndarray, data_type: str):
+    """Core interpretation logic used by both Senior Modeller agents."""
     nx, ny, nz = model.shape
     total_cells = nx * ny * nz
+
+    # Property labels
+    if data_type == "magnetic":
+        prop_name = "Susceptibility"
+        prop_unit = "SI"
+        high_label = "High-Susceptibility"
+        low_label = "Low-Susceptibility"
+        high_targets = "magnetic mineralization (magnetite, pyrrhotite, BIF, mafic/ultramafic intrusions)"
+        low_targets = "non-magnetic zones (felsic intrusions, alteration, demagnetized zones, sediments)"
+    else:
+        prop_name = "Density"
+        prop_unit = "kg/m³"
+        high_label = "High-Density"
+        low_label = "Low-Density"
+        high_targets = "dense bodies (iron ore, massive sulfides, mafic/ultramafic intrusions, BIF)"
+        low_targets = "low-density zones (sedimentary basins, alteration halos, felsic intrusions, voids)"
 
     # Statistical analysis
     model_flat = model.flatten()
@@ -552,27 +633,21 @@ def _render_interpretation(model: np.ndarray):
     std_val = float(model_flat.std())
     vmin, vmax = float(model_flat.min()), float(model_flat.max())
 
-    # Define anomaly thresholds
+    # Anomaly thresholds
     high_threshold = mean_val + 1.5 * std_val
     low_threshold = mean_val - 1.5 * std_val
     very_high_threshold = mean_val + 2.5 * std_val
     very_low_threshold = mean_val - 2.5 * std_val
 
     # Identify anomalous regions
-    high_mask = model > high_threshold
-    low_mask = model < low_threshold
-    very_high_mask = model > very_high_threshold
-    very_low_mask = model < very_low_threshold
-
-    n_high = int(high_mask.sum())
-    n_low = int(low_mask.sum())
-    n_very_high = int(very_high_mask.sum())
-    n_very_low = int(very_low_mask.sum())
-
+    n_high = int((model > high_threshold).sum())
+    n_low = int((model < low_threshold).sum())
+    n_very_high = int((model > very_high_threshold).sum())
+    n_very_low = int((model < very_low_threshold).sum())
     pct_high = 100 * n_high / total_cells
     pct_low = 100 * n_low / total_cells
 
-    # Find centroids of anomalous clusters
+    # Find clusters
     high_anomalies = _find_anomaly_clusters(model, high_threshold, "high")
     low_anomalies = _find_anomaly_clusters(model, low_threshold, "low")
 
@@ -588,66 +663,99 @@ def _render_interpretation(model: np.ndarray):
     st.markdown("#### 📊 Model Statistics")
     m_col1, m_col2, m_col3, m_col4 = st.columns(4)
     with m_col1:
-        st.metric("Mean Density", f"{mean_val:.4f} kg/m³")
+        st.metric(f"Mean {prop_name}", f"{mean_val:.4f} {prop_unit}")
     with m_col2:
-        st.metric("Std Deviation", f"{std_val:.4f}")
+        st.metric("Std Deviation", f"{std_val:.4f} {prop_unit}")
     with m_col3:
-        st.metric("High Anomaly Cells", f"{n_high:,} ({pct_high:.1f}%)")
+        st.metric(f"{high_label} Cells", f"{n_high:,} ({pct_high:.1f}%)")
     with m_col4:
-        st.metric("Low Anomaly Cells", f"{n_low:,} ({pct_low:.1f}%)")
+        st.metric(f"{low_label} Cells", f"{n_low:,} ({pct_low:.1f}%)")
 
-    # Interpretation text
+    # Mineralization leads
     st.markdown("#### 🎯 Potential Mineralization Leads")
 
     if high_anomalies:
-        st.markdown("**🔴 High-Density Anomalies** (potential targets: iron ore, massive sulfides, mafic/ultramafic intrusions)")
+        st.markdown(f"**🔴 {high_label} Anomalies** (potential targets: {high_targets})")
         for i, anomaly in enumerate(high_anomalies[:5], 1):
             depth_label = _depth_category(anomaly["z_center"], nz)
             st.markdown(
-                f"- **Lead H{i}:** Centroid at cell ({anomaly['x_center']}, {anomaly['y_center']}, {anomaly['z_center']}) | "
-                f"Peak density: **{anomaly['peak_value']:.4f}** kg/m³ | "
-                f"Volume: ~{anomaly['volume_cells']:,} cells | "
-                f"Depth: {depth_label}"
+                f"- **Lead H{i}:** Centroid at cell ({anomaly['x_center']}, "
+                f"{anomaly['y_center']}, {anomaly['z_center']}) | "
+                f"Peak: **{anomaly['peak_value']:.4f}** {prop_unit} | "
+                f"Volume: ~{anomaly['volume_cells']:,} cells | Depth: {depth_label}"
             )
     else:
-        st.info("No significant high-density anomalies detected above threshold.")
+        st.info(f"No significant {high_label.lower()} anomalies detected above threshold.")
 
     if low_anomalies:
-        st.markdown("**🔵 Low-Density Anomalies** (potential targets: sedimentary basins, alteration zones, voids, felsic intrusions)")
+        st.markdown(f"**🔵 {low_label} Anomalies** (potential targets: {low_targets})")
         for i, anomaly in enumerate(low_anomalies[:5], 1):
             depth_label = _depth_category(anomaly["z_center"], nz)
             st.markdown(
-                f"- **Lead L{i}:** Centroid at cell ({anomaly['x_center']}, {anomaly['y_center']}, {anomaly['z_center']}) | "
-                f"Peak density: **{anomaly['peak_value']:.4f}** kg/m³ | "
-                f"Volume: ~{anomaly['volume_cells']:,} cells | "
-                f"Depth: {depth_label}"
+                f"- **Lead L{i}:** Centroid at cell ({anomaly['x_center']}, "
+                f"{anomaly['y_center']}, {anomaly['z_center']}) | "
+                f"Peak: **{anomaly['peak_value']:.4f}** {prop_unit} | "
+                f"Volume: ~{anomaly['volume_cells']:,} cells | Depth: {depth_label}"
             )
     else:
-        st.info("No significant low-density anomalies detected below threshold.")
+        st.info(f"No significant {low_label.lower()} anomalies detected below threshold.")
 
-    # Geological context
+    # Geological context — agent-specific interpretation
     st.markdown("#### 📝 Interpretation Summary")
+    if data_type == "magnetic":
+        _magnetic_interpretation_text(
+            nx, ny, nz, vmin, vmax, mean_val, std_val, total_cells,
+            n_very_high, n_very_low, very_high_threshold, very_low_threshold,
+            high_anomalies, low_anomalies, prop_unit,
+        )
+    else:
+        _gravity_interpretation_text(
+            nx, ny, nz, vmin, vmax, mean_val, std_val, total_cells,
+            n_very_high, n_very_low, very_high_threshold, very_low_threshold,
+            high_anomalies, low_anomalies, prop_unit,
+        )
 
-    interpretation_lines = []
-    interpretation_lines.append(
-        f"The inversion model spans a grid of **{nx}×{ny}×{nz}** cells with density contrast "
-        f"ranging from **{vmin:.4f}** to **{vmax:.4f}** kg/m³ (mean: {mean_val:.4f}, σ: {std_val:.4f})."
+    # Recommendations — agent-specific
+    st.markdown("#### 💡 Recommendations")
+    if data_type == "magnetic":
+        _magnetic_recommendations(high_anomalies, low_anomalies)
+    else:
+        _gravity_recommendations(high_anomalies, low_anomalies)
+
+
+def _gravity_interpretation_text(
+    nx, ny, nz, vmin, vmax, mean_val, std_val, total_cells,
+    n_very_high, n_very_low, very_high_threshold, very_low_threshold,
+    high_anomalies, low_anomalies, prop_unit,
+):
+    """Senior Gravity Modeller interpretation — density-focused geological reasoning."""
+    lines = []
+    lines.append(
+        f"The recovered density contrast model spans **{nx}×{ny}×{nz}** cells with values "
+        f"ranging from **{vmin:.4f}** to **{vmax:.4f}** {prop_unit} "
+        f"(mean: {mean_val:.4f}, σ: {std_val:.4f})."
     )
 
     if n_very_high > 0:
-        interpretation_lines.append(
-            f"**{n_very_high:,} cells** ({100*n_very_high/total_cells:.2f}%) exhibit very high density contrast (>{very_high_threshold:.4f}), "
-            f"suggesting compact, dense geological bodies that may represent mineralized zones (e.g., massive sulfides, BIF, or mafic intrusions)."
+        lines.append(
+            f"**{n_very_high:,} cells** ({100*n_very_high/total_cells:.2f}%) exhibit very high "
+            f"density contrast (>{very_high_threshold:.4f} {prop_unit}), suggesting compact, "
+            f"dense geological bodies. In an exploration context, these may represent: "
+            f"massive sulfide accumulations, banded iron formation (BIF), mafic/ultramafic "
+            f"intrusions, or iron oxide mineralisation. The geometry and depth extent of "
+            f"these bodies should be assessed against known geological structures."
         )
 
     if n_very_low > 0:
-        interpretation_lines.append(
-            f"**{n_very_low:,} cells** ({100*n_very_low/total_cells:.2f}%) exhibit very low density contrast (<{very_low_threshold:.4f}), "
-            f"potentially indicating alteration halos, sedimentary infill, or structural voids that may be associated with hydrothermal systems."
+        lines.append(
+            f"**{n_very_low:,} cells** ({100*n_very_low/total_cells:.2f}%) exhibit very low "
+            f"density contrast (<{very_low_threshold:.4f} {prop_unit}), potentially indicating "
+            f"regolith, sedimentary infill, phyllic/argillic alteration halos, felsic "
+            f"intrusions (e.g., granites), or structural voids. These low-density corridors "
+            f"may represent fluid pathways associated with hydrothermal mineral systems."
         )
 
     if high_anomalies and low_anomalies:
-        # Check for spatial association (high near low = possible mineralization system)
         for h in high_anomalies[:3]:
             for l in low_anomalies[:3]:
                 dist = np.sqrt(
@@ -656,10 +764,12 @@ def _render_interpretation(model: np.ndarray):
                     (h["z_center"] - l["z_center"])**2
                 )
                 if dist < max(nx, ny, nz) * 0.25:
-                    interpretation_lines.append(
-                        f"⭐ **Spatial association detected:** High-density Lead H and Low-density Lead L "
-                        f"are in proximity (distance ~{dist:.0f} cells), which may indicate a "
-                        f"mineralization system with dense ore adjacent to an alteration/structural corridor."
+                    lines.append(
+                        f"⭐ **Spatial association detected:** A high-density body is proximal to "
+                        f"a low-density zone (distance ~{dist:.0f} cells). This juxtaposition is "
+                        f"characteristic of mineralised systems where dense ore sits adjacent to "
+                        f"altered/deformed host rock — a classic density dipole signature in "
+                        f"orogenic gold and VMS settings."
                     )
                     break
             else:
@@ -667,29 +777,118 @@ def _render_interpretation(model: np.ndarray):
             break
 
     if not high_anomalies and not low_anomalies:
-        interpretation_lines.append(
-            "The model shows relatively uniform density distribution without significant anomalies exceeding 1.5σ. "
-            "This may indicate a homogeneous geological setting or that the inversion regularization has smoothed subtle features. "
-            "Consider adjusting inversion parameters or increasing iterations."
+        lines.append(
+            "The model shows relatively uniform density distribution without significant "
+            "anomalies exceeding 1.5σ. This may indicate: a geologically homogeneous setting, "
+            "inversion regularisation that has over-smoothed subtle features, or insufficient "
+            "data coverage. Consider reducing regularisation strength or increasing iterations."
         )
 
-    for line in interpretation_lines:
+    for line in lines:
         st.markdown(line)
 
-    # Recommendation
-    st.markdown("#### 💡 Recommendations")
-    recommendations = []
-    if high_anomalies:
-        recommendations.append("• Prioritize drilling targets at high-density Lead H1 for potential massive ore confirmation")
-    if low_anomalies:
-        recommendations.append("• Investigate low-density zones for structural controls and alteration mapping")
-    if high_anomalies or low_anomalies:
-        recommendations.append("• Cross-reference with magnetic data and surface geology for target validation")
-        recommendations.append("• Consider follow-up ground geophysics (e.g., EM, IP) over anomaly clusters")
-    recommendations.append("• Compare with regional geological maps and known mineral occurrences")
 
-    for rec in recommendations:
-        st.markdown(rec)
+def _magnetic_interpretation_text(
+    nx, ny, nz, vmin, vmax, mean_val, std_val, total_cells,
+    n_very_high, n_very_low, very_high_threshold, very_low_threshold,
+    high_anomalies, low_anomalies, prop_unit,
+):
+    """Senior Magnetic Modeller interpretation — susceptibility-focused geological reasoning."""
+    lines = []
+    lines.append(
+        f"The recovered magnetic susceptibility model spans **{nx}×{ny}×{nz}** cells with values "
+        f"ranging from **{vmin:.4f}** to **{vmax:.4f}** {prop_unit} "
+        f"(mean: {mean_val:.4f}, σ: {std_val:.4f})."
+    )
+
+    if n_very_high > 0:
+        lines.append(
+            f"**{n_very_high:,} cells** ({100*n_very_high/total_cells:.2f}%) exhibit very high "
+            f"susceptibility (>{very_high_threshold:.4f} {prop_unit}), indicative of significant "
+            f"magnetite or pyrrhotite content. In exploration context, these may represent: "
+            f"magnetite-bearing BIF, mafic/ultramafic intrusions (gabbro, peridotite), "
+            f"magnetite-rich skarns, or iron oxide copper-gold (IOCG) systems. "
+            f"The susceptibility magnitude and geometry constrain the likely lithology."
+        )
+
+    if n_very_low > 0:
+        lines.append(
+            f"**{n_very_low:,} cells** ({100*n_very_low/total_cells:.2f}%) exhibit very low or "
+            f"negative susceptibility (<{very_low_threshold:.4f} {prop_unit}). Low susceptibility "
+            f"zones may indicate: felsic intrusions (granites, rhyolites), sedimentary sequences, "
+            f"or demagnetised zones from alteration (magnetite-destructive alteration is a key "
+            f"indicator of hydrothermal fluid flow in porphyry and epithermal systems). "
+            f"Negative values may also suggest remanent magnetisation opposing the induced field."
+        )
+
+    if high_anomalies and low_anomalies:
+        for h in high_anomalies[:3]:
+            for l in low_anomalies[:3]:
+                dist = np.sqrt(
+                    (h["x_center"] - l["x_center"])**2 +
+                    (h["y_center"] - l["y_center"])**2 +
+                    (h["z_center"] - l["z_center"])**2
+                )
+                if dist < max(nx, ny, nz) * 0.25:
+                    lines.append(
+                        f"⭐ **Magnetic contrast boundary detected:** A high-susceptibility body "
+                        f"is adjacent to a low-susceptibility zone (distance ~{dist:.0f} cells). "
+                        f"This sharp susceptibility gradient may represent a lithological contact, "
+                        f"fault boundary, or the edge of a magnetite-destructive alteration envelope "
+                        f"— all of which can be significant for mineral targeting."
+                    )
+                    break
+            else:
+                continue
+            break
+
+    if not high_anomalies and not low_anomalies:
+        lines.append(
+            "The model shows relatively uniform susceptibility distribution without significant "
+            "anomalies exceeding 1.5σ. This may indicate: a magnetically transparent setting "
+            "(e.g., thick sedimentary cover), over-smoothed inversion, or insufficient data "
+            "coverage. Consider reducing regularisation or reviewing the inducing field parameters."
+        )
+
+    for line in lines:
+        st.markdown(line)
+
+
+def _gravity_recommendations(high_anomalies, low_anomalies):
+    """Senior Gravity Modeller recommendations."""
+    recs = []
+    if high_anomalies:
+        recs.append("• Prioritise drilling at Lead H1 to test for massive ore (BIF, sulfides, mafic bodies)")
+        recs.append("• Assess depth extent of high-density bodies for tonnage estimation")
+    if low_anomalies:
+        recs.append("• Map low-density corridors for structural controls and alteration footprints")
+        recs.append("• Evaluate if low-density zones correlate with known fault/shear systems")
+    if high_anomalies or low_anomalies:
+        recs.append("• Cross-reference with magnetic susceptibility model to discriminate lithologies")
+        recs.append("• Consider constrained inversion using geological contacts as prior information")
+    recs.append("• Compare with regional geological maps and known mineral occurrences")
+    recs.append("• Integrate petrophysical measurements from drill core for model validation")
+    for r in recs:
+        st.markdown(r)
+
+
+def _magnetic_recommendations(high_anomalies, low_anomalies):
+    """Senior Magnetic Modeller recommendations."""
+    recs = []
+    if high_anomalies:
+        recs.append("• Prioritise high-susceptibility Lead H1 for potential magnetite-rich targets (BIF, IOCG, mafic intrusions)")
+        recs.append("• Assess whether high-susceptibility bodies correlate with gravity highs (dense magnetic = mafic/BIF)")
+    if low_anomalies:
+        recs.append("• Investigate low-susceptibility zones for magnetite-destructive alteration halos (porphyry/epithermal indicator)")
+        recs.append("• Evaluate if demagnetised zones correspond to known structures or fluid pathways")
+    if high_anomalies or low_anomalies:
+        recs.append("• Cross-reference with gravity density model to constrain lithological interpretation")
+        recs.append("• Check for remanent magnetisation if model shows negative susceptibility values")
+    recs.append("• Compare susceptibility model with mapped geology and known magnetic petrophysics")
+    recs.append("• Consider joint gravity-magnetic inversion to reduce non-uniqueness")
+    recs.append("• Validate with downhole magnetic susceptibility measurements where available")
+    for r in recs:
+        st.markdown(r)
 
 
 def _find_anomaly_clusters(model: np.ndarray, threshold: float, anomaly_type: str) -> list:
@@ -775,6 +974,9 @@ def _render_3d_model(model: np.ndarray, title: str):
     """Render a full 3D interactive isosurface visualization of the model."""
     nx, ny, nz = model.shape
 
+    # Opacity slider
+    opacity_val = st.slider("Opacity", 0.1, 1.0, 0.9, 0.05, key="iso_opacity")
+
     # Create coordinate arrays
     X, Y, Z = np.mgrid[0:nx, 0:ny, 0:nz]
 
@@ -787,10 +989,18 @@ def _render_3d_model(model: np.ndarray, title: str):
     # Use isosurface for 3D visualization (efficient for large models)
     vmin, vmax = float(values.min()), float(values.max())
 
-    # Create multiple isosurface levels
-    n_levels = 6
-    isomin = vmin + 0.1 * (vmax - vmin)
-    isomax = vmax - 0.1 * (vmax - vmin)
+    # Focus on the anomalous body: use tighter iso range centered on high values
+    # Skip the background (near-zero) values to highlight the body
+    mean_val = float(values.mean())
+    std_val = float(values.std())
+    isomin = mean_val + 0.5 * std_val  # Only show above-average values
+    isomax = vmax - 0.05 * (vmax - vmin)
+
+    # If model has both positive and negative anomalies, show both
+    if vmin < mean_val - std_val:
+        isomin = vmin + 0.05 * (vmax - vmin)
+
+    n_levels = 8  # More surfaces for better body definition
 
     fig = go.Figure(data=go.Isosurface(
         x=x_flat, y=y_flat, z=z_flat,
@@ -800,17 +1010,17 @@ def _render_3d_model(model: np.ndarray, title: str):
         surface_count=n_levels,
         colorscale='RdBu_r',
         caps=dict(x_show=True, y_show=True, z_show=True),
-        opacity=0.6,
-        colorbar=dict(title="Density (kg/m³)", thickness=20, len=0.7),
+        opacity=opacity_val,
+        colorbar=dict(title="Susceptibility (SI)" if st.session_state.get("active_data_type", "Gravity").lower() == "magnetic" else "Density (kg/m³)", thickness=20, len=0.7),
         hovertemplate="X: %{x}<br>Y: %{y}<br>Z: %{z}<br>Value: %{value:.4f}<extra></extra>",
     ))
 
     fig.update_layout(
         title=dict(text=f"3D Model — {title}", x=0.5, font=dict(size=16)),
         scene=dict(
-            xaxis_title="X cell",
-            yaxis_title="Y cell",
-            zaxis_title="Z cell (depth)",
+            xaxis_title="X",
+            yaxis_title="Y",
+            zaxis_title="Z (depth)",
             aspectmode='data',
             camera=dict(
                 eye=dict(x=1.6, y=-1.6, z=-1.2),
@@ -828,14 +1038,16 @@ def _render_3d_sections(model: np.ndarray, title: str):
     """Render 3D model with interactive orthogonal slice planes."""
     nx, ny, nz = model.shape
 
-    # Sliders for slice positions
-    sl_col1, sl_col2, sl_col3 = st.columns(3)
+    # Sliders for slice positions and opacity
+    sl_col1, sl_col2, sl_col3, sl_col4 = st.columns(4)
     with sl_col1:
         sec_z = st.slider("Z-plane (depth)", 0, nz - 1, nz // 2, key="sec3d_z")
     with sl_col2:
         sec_x = st.slider("X-plane", 0, nx - 1, nx // 2, key="sec3d_x")
     with sl_col3:
         sec_y = st.slider("Y-plane", 0, ny - 1, ny // 2, key="sec3d_y")
+    with sl_col4:
+        sec_opacity = st.slider("Opacity", 0.1, 1.0, 0.9, 0.05, key="sec3d_opacity")
 
     fig = go.Figure()
 
@@ -849,8 +1061,8 @@ def _render_3d_sections(model: np.ndarray, title: str):
         surfacecolor=z_slice,
         colorscale='RdBu_r', cmin=vmin, cmax=vmax,
         showscale=True,
-        colorbar=dict(title="Density (kg/m³)", thickness=20, len=0.7, x=1.02),
-        opacity=0.9,
+        colorbar=dict(title="Susceptibility (SI)" if st.session_state.get("active_data_type", "Gravity").lower() == "magnetic" else "Density (kg/m³)", thickness=20, len=0.7, x=1.02),
+        opacity=sec_opacity,
         name=f"Z={sec_z}",
         hovertemplate="X: %{x}<br>Y: %{y}<br>Z: %{z}<br>Value: %{surfacecolor:.4f}<extra>Z-plane</extra>",
     ))
@@ -864,7 +1076,7 @@ def _render_3d_sections(model: np.ndarray, title: str):
         surfacecolor=x_slice,
         colorscale='RdBu_r', cmin=vmin, cmax=vmax,
         showscale=False,
-        opacity=0.9,
+        opacity=sec_opacity,
         name=f"X={sec_x}",
         hovertemplate="X: %{x}<br>Y: %{y}<br>Z: %{z}<br>Value: %{surfacecolor:.4f}<extra>X-plane</extra>",
     ))
@@ -879,7 +1091,7 @@ def _render_3d_sections(model: np.ndarray, title: str):
         surfacecolor=y_slice,
         colorscale='RdBu_r', cmin=vmin, cmax=vmax,
         showscale=False,
-        opacity=0.9,
+        opacity=sec_opacity,
         name=f"Y={sec_y}",
         hovertemplate="X: %{x}<br>Y: %{y}<br>Z: %{z}<br>Value: %{surfacecolor:.4f}<extra>Y-plane</extra>",
     ))
@@ -887,9 +1099,9 @@ def _render_3d_sections(model: np.ndarray, title: str):
     fig.update_layout(
         title=dict(text=f"3D Cross-Sections — {title}", x=0.5, font=dict(size=16)),
         scene=dict(
-            xaxis_title="X cell",
-            yaxis_title="Y cell",
-            zaxis_title="Z cell (depth)",
+            xaxis_title="X",
+            yaxis_title="Y",
+            zaxis_title="Z (depth)",
             aspectmode='data',
             camera=dict(
                 eye=dict(x=1.6, y=-1.6, z=-1.2),
@@ -913,15 +1125,15 @@ def _render_slice(model: np.ndarray, title: str, idx: int, axis: str = "z"):
     if axis == "z":
         idx = min(idx, model.shape[2] - 1)
         slice_data = model[:, :, idx]
-        xlabel, ylabel = "X cell", "Y cell"
+        xlabel, ylabel = "X", "Y"
     elif axis == "x":
         idx = min(idx, model.shape[0] - 1)
         slice_data = model[idx, :, :]
-        xlabel, ylabel = "Y cell", "Z cell"
+        xlabel, ylabel = "Y", "Z"
     elif axis == "y":
         idx = min(idx, model.shape[1] - 1)
         slice_data = model[:, idx, :]
-        xlabel, ylabel = "X cell", "Z cell"
+        xlabel, ylabel = "X", "Z"
     else:
         return
 
@@ -939,7 +1151,7 @@ def _render_slice(model: np.ndarray, title: str, idx: int, axis: str = "z"):
         ),
         line=dict(width=1, color="black"),
         ncontours=20,
-        colorbar=dict(title="Density (kg/m³)", thickness=15, len=0.9),
+        colorbar=dict(title="Susceptibility (SI)" if st.session_state.get("active_data_type", "Gravity").lower() == "magnetic" else "Density (kg/m³)", thickness=15, len=0.9),
         hovertemplate=f"{xlabel}: %{{x}}<br>{ylabel}: %{{y}}<br>Density: %{{z:.4f}}<extra></extra>",
     ))
 

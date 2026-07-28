@@ -68,11 +68,14 @@ def parse_costs_file(costs_path: str) -> list[float]:
                 if line.startswith("#") or not line:
                     continue
                 parts = line.split()
-                if len(parts) >= 2:
+                if len(parts) >= 3:
                     try:
                         iteration = int(parts[0])
                         data_cost_grav = float(parts[1])
-                        costs.append(data_cost_grav)
+                        data_cost_mag = float(parts[2])
+                        # Use whichever is non-zero (gravity or magnetic)
+                        cost = data_cost_mag if data_cost_grav == 0.0 else data_cost_grav
+                        costs.append(cost)
                     except (ValueError, IndexError):
                         continue
     except FileNotFoundError:
@@ -130,6 +133,28 @@ def run_tomofast_inversion(parfile_path: str, output_dir: str) -> dict:
         "binary": TOMOFAST_BIN,
     })
 
+    # Compute adaptive timeout based on problem size from parfile
+    # Large problems (sensitivity matrix > 1 GB) need significantly more time
+    timeout_seconds = 300  # default: 5 minutes
+    parfile_full_path = os.path.join(TOMOFAST_DIR, parfile_path)
+    try:
+        with open(parfile_full_path, "r") as pf:
+            pf_content = pf.read()
+        grid_match = re.search(r"modelGrid\.size\s*=\s*(\d+)\s+(\d+)\s+(\d+)", pf_content)
+        ndata_match = re.search(r"nData\s*=\s*(\d+)", pf_content)
+        if grid_match and ndata_match:
+            n_cells = int(grid_match.group(1)) * int(grid_match.group(2)) * int(grid_match.group(3))
+            n_data = int(ndata_match.group(1))
+            sensitivity_gb = (n_data * n_cells * 8) / (1024**3)
+            # Scale timeout: ~200s per GB of sensitivity, minimum 600s, max 3600s
+            timeout_seconds = max(600, min(3600, int(sensitivity_gb * 200)))
+    except Exception:
+        pass  # Fall back to default
+
+    event_logger.log_skill("TomofastSkill", f"Timeout set to {timeout_seconds}s", details={
+        "estimated_sensitivity_gb": f"{sensitivity_gb:.1f}" if 'sensitivity_gb' in dir() else "unknown",
+    })
+
     # Ensure output directory exists
     full_output = os.path.join(TOMOFAST_DIR, output_dir)
     os.makedirs(full_output, exist_ok=True)
@@ -146,7 +171,7 @@ def run_tomofast_inversion(parfile_path: str, output_dir: str) -> dict:
             capture_output=True,
             text=True,
             cwd=TOMOFAST_DIR,
-            timeout=300,  # 5 minute timeout
+            timeout=timeout_seconds,
         )
 
         stdout = result.stdout
@@ -182,8 +207,8 @@ def run_tomofast_inversion(parfile_path: str, output_dir: str) -> dict:
         }
 
     except subprocess.TimeoutExpired:
-        event_logger.log_skill("TomofastSkill", "Tomofast-x timed out after 300s", level=LogLevel.ERROR)
-        return {"success": False, "error": "Timeout after 300 seconds"}
+        event_logger.log_skill("TomofastSkill", f"Tomofast-x timed out after {timeout_seconds}s", level=LogLevel.ERROR)
+        return {"success": False, "error": f"Timeout after {timeout_seconds} seconds"}
     except Exception as e:
         event_logger.log_skill("TomofastSkill", f"Error running Tomofast-x: {str(e)}", level=LogLevel.ERROR)
         return {"success": False, "error": str(e)}
@@ -230,6 +255,12 @@ def run_full_inversion(parfile_rel_path: str):
             match = re.search(r"nData\s*=\s*(\d+)", content)
             if match:
                 parfile_info["n_data"] = int(match.group(1))
+            match = re.search(r"matrixCompression\.type\s*=\s*(\d+)", content)
+            if match:
+                parfile_info["compression_type"] = int(match.group(1))
+            match = re.search(r"matrixCompression\.rate\s*=\s*([\d.]+)", content)
+            if match:
+                parfile_info["compression_rate"] = float(match.group(1))
     except Exception as e:
         event_logger.log_tool("parfile_reader", f"Error reading Parfile: {e}", level=LogLevel.ERROR)
 
@@ -280,6 +311,8 @@ def run_full_inversion(parfile_rel_path: str):
             "final_misfit": result["misfit_history"][-1] if result["misfit_history"] else None,
             "iterations": result["parsed"]["iterations_completed"],
             "stdout": result["stdout"],
+            "compression_type": parfile_info.get("compression_type", 0),
+            "compression_rate": parfile_info.get("compression_rate", 0.15),
         }
         st.session_state.current_iteration_tomofast = result["parsed"]["iterations_completed"]
         st.session_state.progress_tomofast = 1.0
@@ -370,6 +403,223 @@ def _render_full_log_section():
         )
 
 
+def _load_result_model_3d(results: dict) -> np.ndarray | None:
+    """Load the Tomofast-x model file and reshape to 3D grid."""
+    output_dir = results.get("output_dir", "")
+    if not output_dir:
+        return None
+
+    # Find model file
+    model_path = os.path.join(output_dir, "model", "grav_final_model_full.txt")
+    if not os.path.exists(model_path):
+        model_path = os.path.join(output_dir, "model", "mag_final_model_full.txt")
+    if not os.path.exists(model_path):
+        model_dir = os.path.join(output_dir, "model")
+        if os.path.exists(model_dir):
+            candidates = [f for f in os.listdir(model_dir) if "model" in f and f.endswith(".txt")]
+            if candidates:
+                model_path = os.path.join(model_dir, candidates[0])
+
+    if not os.path.exists(model_path):
+        return None
+
+    # Read model values
+    values = []
+    try:
+        with open(model_path, "r") as f:
+            for i, line in enumerate(f):
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                try:
+                    val = float(line)
+                    if i == 0 and val == int(val) and val > 100:
+                        continue  # Skip cell count header
+                    values.append(val)
+                except ValueError:
+                    pass
+    except Exception:
+        return None
+
+    if not values:
+        return None
+
+    model_values = np.array(values)
+
+    # Get grid dimensions from Parfile_copy.txt
+    nx, ny, nz = 0, 0, 0
+    parfile_copy = os.path.join(output_dir, "Parfile_copy.txt")
+    if os.path.exists(parfile_copy):
+        with open(parfile_copy, "r") as f:
+            content = f.read()
+        match = re.search(r"modelGrid\.size\s*=\s*(\d+)\s+(\d+)\s+(\d+)", content)
+        if match:
+            nx, ny, nz = int(match.group(1)), int(match.group(2)), int(match.group(3))
+
+    # Fallback: try known sizes
+    if nx * ny * nz != len(model_values):
+        n = len(model_values)
+        known = {57057: (13, 133, 33), 4000: (20, 20, 10), 62500: (50, 50, 25)}
+        if n in known:
+            nx, ny, nz = known[n]
+        else:
+            # Factorize
+            for z in range(int(n ** 0.33) + 5, 1, -1):
+                if n % z == 0:
+                    rem = n // z
+                    for y in range(int(rem ** 0.5) + 5, 1, -1):
+                        if rem % y == 0:
+                            nx, ny, nz = rem // y, y, z
+                            break
+                    if nx > 0:
+                        break
+
+    if nx * ny * nz == len(model_values):
+        return model_values.reshape((nx, ny, nz), order='F')
+    return None
+
+
+def _render_result_3d_model(model: np.ndarray):
+    """Render 3D model cross-sections on the Run page."""
+    import plotly.graph_objects as go
+
+    nx, ny, nz = model.shape
+    st.caption(f"Model grid: {nx} × {ny} × {nz} cells ({nx*ny*nz:,} total)")
+
+    # Sliders for slice positions
+    sl_col1, sl_col2, sl_col3 = st.columns(3)
+    with sl_col1:
+        slice_z = st.slider("Depth Slice (Z)", 0, nz - 1, nz // 2, key="run_slice_z")
+    with sl_col2:
+        slice_x = st.slider("X Slice", 0, nx - 1, nx // 2, key="run_slice_x")
+    with sl_col3:
+        slice_y = st.slider("Y Slice", 0, ny - 1, ny // 2, key="run_slice_y")
+
+    # Render 3 cross-section tabs
+    tab_z, tab_x, tab_y = st.tabs(["Depth Slice (XY)", "X-Section (YZ)", "Y-Section (XZ)"])
+
+    with tab_z:
+        _render_run_slice(model[:, :, min(slice_z, nz-1)], f"Depth Z={slice_z}", "X", "Y")
+    with tab_x:
+        _render_run_slice(model[min(slice_x, nx-1), :, :], f"X={slice_x}", "Y", "Z")
+    with tab_y:
+        _render_run_slice(model[:, min(slice_y, ny-1), :], f"Y={slice_y}", "X", "Z")
+
+
+def _render_run_slice(slice_data: np.ndarray, title: str, xlabel: str, ylabel: str):
+    """Render a single 2D slice as a contour plot."""
+    import plotly.graph_objects as go
+
+    fig = go.Figure()
+    fig.add_trace(go.Contour(
+        z=slice_data.T,
+        colorscale="RdBu_r",
+        contours=dict(
+            coloring="heatmap",
+            showlabels=True,
+            showlines=True,
+            labelfont=dict(size=10, color="black"),
+        ),
+        line=dict(width=1, color="black"),
+        ncontours=20,
+        colorbar=dict(title="Susceptibility (SI)" if st.session_state.get("active_data_type", "Gravity").lower() == "magnetic" else "Density (kg/m³)", thickness=15, len=0.9),
+        hovertemplate=f"{xlabel}: %{{x}}<br>{ylabel}: %{{y}}<br>Density: %{{z:.4f}}<extra></extra>",
+    ))
+    fig.update_layout(
+        title=dict(text=title, font=dict(size=14)),
+        xaxis_title=xlabel,
+        yaxis_title=ylabel,
+        height=400,
+        margin=dict(l=50, r=20, t=40, b=40),
+        yaxis=dict(scaleanchor="x"),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _get_data_source() -> str:
+    """Determine the active data source: 'demo', 'user', or 'none'."""
+    dataset = st.session_state.get("dataset")
+    if dataset is None:
+        return "none"
+    uploaded_file = st.session_state.get("uploaded_file", "")
+    if "demo" in uploaded_file.lower() or "synthetic" in uploaded_file.lower():
+        return "demo"
+    return "user"
+
+
+def _detect_data_type() -> str:
+    """Auto-detect whether data is gravity or magnetic based on file name, format, and columns.
+
+    Returns 'gravity' or 'magnetic'.
+    """
+    uploaded_file = st.session_state.get("uploaded_file", "")
+    data_format = st.session_state.get("data_format", "")
+    dataset = st.session_state.get("dataset")
+
+    # Check file name
+    name_lower = uploaded_file.lower()
+    if "mag" in name_lower or "tmi" in name_lower or "suscept" in name_lower:
+        return "magnetic"
+    if "grav" in name_lower or "bouger" in name_lower or "density" in name_lower:
+        return "gravity"
+
+    # Check format
+    if "magnetic" in data_format.lower():
+        return "magnetic"
+
+    # Check column names
+    if dataset is not None:
+        for col in dataset.columns:
+            cl = col.lower()
+            if "mag" in cl or "tmi" in cl or "suscept" in cl:
+                return "magnetic"
+
+    # Default
+    return "gravity"
+
+
+def _prepare_active_data_inversion() -> dict | None:
+    """Prepare inversion files from the active dataset (demo or user-uploaded).
+
+    Returns a dict with parfile_rel_path, output_dir, etc., or None on failure.
+    """
+    from skills.tomofast.run_preparation import prepare_inversion
+
+    dataset = st.session_state.get("dataset")
+    if dataset is None:
+        st.error("No dataset loaded. Please go to Setup and upload data or load the demo.")
+        return None
+
+    data_source = _get_data_source()
+    run_label = "demo_gravity" if data_source == "demo" else "user_inversion"
+
+    # Determine mesh spec for demo (known mesh) vs auto for user data
+    if data_source == "demo":
+        mesh_spec = {"nx": 20, "ny": 20, "nz": 10, "cell_size": (50.0, 50.0, 50.0)}
+    else:
+        mesh_spec = None  # auto-generate from data extent
+
+    try:
+        data_type_sel = st.session_state.get("active_data_type", "Gravity").lower()
+        reg_str = st.session_state.get("active_reg_strength", "Medium").lower()
+        config = st.session_state.get("config", {})
+        result = prepare_inversion(
+            dataset=dataset,
+            data_type=data_type_sel,
+            n_iterations=10,
+            mesh_spec=mesh_spec,
+            run_label=run_label,
+            reg_strength=reg_str,
+            mag_inclination=config.get("inclination", -60.0),
+            mag_declination=config.get("declination", 0.0),
+            mag_intensity=config.get("field_strength", 0.0),
+        )
+        return result
+    except Exception as e:
+        st.error(f"Failed to prepare inversion: {e}")
+        return None
+
+
 def render_run_page():
     """Render the Execution & Monitoring page."""
     st.header("▶️ Inversion Execution")
@@ -380,75 +630,354 @@ def render_run_page():
     st.subheader(f"Status: {get_status_indicator(run_status)}")
     st.markdown("---")
 
-    # --- Inversion Selection ---
+    # --- Determine data source ---
+    data_source = _get_data_source()
+
+    # --- Inversion Mode Selection ---
     st.subheader("🎯 Select Inversion to Run")
 
-    # Get available parfiles
-    parfiles = get_available_parfiles()
+    # Show which data is active
+    if data_source == "demo":
+        st.info("🚀 **Demo data loaded** — Will invert the synthetic gravity cube (100 stations, 20×20×10 mesh)")
+    elif data_source == "user":
+        uploaded_name = st.session_state.get("uploaded_file", "Unknown")
+        n_pts = len(st.session_state.get("dataset", []))
+        st.info(f"📂 **User data loaded** — `{uploaded_name}` ({n_pts} stations). Will generate mesh and Parfile automatically.")
+    else:
+        st.warning("⚠️ No data loaded. You can still run a pre-bundled example below, or go to Setup to upload data.")
 
-    if not parfiles:
-        st.error("No Parfiles found in Tomofast-x directory.")
-        return
+    # Mode tabs: Active Data vs Pre-bundled Examples
+    if data_source != "none":
+        tab_active, tab_examples = st.tabs(["📊 Run My Data", "📁 Pre-bundled Examples"])
+    else:
+        tab_active = None
+        tab_examples = st.container()
 
-    # Selection
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        selected_name = st.selectbox(
-            "Choose an inversion example",
-            options=list(parfiles.keys()),
-            index=list(parfiles.keys()).index("Hamersley Grav") if "Hamersley Grav" in parfiles else 0,
-            help="Select a pre-configured Parfile to run",
-        )
-    with col2:
-        st.markdown("")
-        st.markdown("")
-        selected_parfile = parfiles[selected_name]
-        st.caption(f"📄 `{selected_parfile}`")
+    # --- Tab 1: Run active (demo or user) data ---
+    if tab_active is not None:
+        with tab_active:
+            # Show input data summary
+            dataset = st.session_state.get("dataset")
+            uploaded_name = st.session_state.get("uploaded_file", "Unknown")
 
-    # Show Parfile details
-    parfile_full = os.path.join(TOMOFAST_DIR, selected_parfile)
-    if os.path.exists(parfile_full):
-        with st.expander("📋 Parfile Parameters"):
-            with open(parfile_full, "r") as f:
-                content = f.read()
-            # Extract key info
-            desc = re.search(r"description\s*=\s*(.+)", content)
-            grid = re.search(r"modelGrid\.size\s*=\s*(.+)", content)
-            ndata = re.search(r"nData\s*=\s*(\d+)", content)
-            niters = re.search(r"nMajorIterations\s*=\s*(\d+)", content)
+            # If demo data is loaded, offer option to load user's own data
+            if data_source == "demo":
+                st.info("🚀 Currently using **demo data**. Upload your own CSV below to switch to your data.")
+                user_file = st.file_uploader(
+                    "Upload your data (CSV)",
+                    type=["csv", "xyz", "obs", "grv", "mag", "txt", "dat"],
+                    key="run_page_upload",
+                    help="Upload gravity or magnetic observation data to replace the demo",
+                )
+                if user_file is not None:
+                    import pandas as pd
+                    from io import StringIO
+                    content = user_file.getvalue().decode("utf-8")
+                    df = pd.read_csv(StringIO(content))
+                    # Standardize columns
+                    col_remap = {}
+                    for col in df.columns:
+                        cl = col.lower()
+                        if cl in ("x", "easting", "east", "longitude", "lon"):
+                            col_remap[col] = "X"
+                        elif cl in ("y", "northing", "north", "latitude", "lat"):
+                            col_remap[col] = "Y"
+                        elif cl in ("z", "elevation", "elev", "depth", "height"):
+                            col_remap[col] = "Z"
+                        elif cl in ("value", "gravity", "anomaly", "gz", "obs", "observed") or "grav" in cl or "anomaly" in cl or "mag" in cl:
+                            if "uncertainty" not in cl and "error" not in cl and "std" not in cl:
+                                if "Value" not in col_remap.values():
+                                    col_remap[col] = "Value"
+                    if col_remap:
+                        df = df.rename(columns=col_remap)
 
-            info_cols = st.columns(4)
-            with info_cols[0]:
-                st.metric("Grid Size", grid.group(1).strip() if grid else "N/A")
-            with info_cols[1]:
-                st.metric("Data Points", ndata.group(1) if ndata else "N/A")
-            with info_cols[2]:
-                st.metric("Major Iterations", niters.group(1) if niters else "N/A")
-            with info_cols[3]:
-                st.metric("Description", desc.group(1).strip()[:30] if desc else "N/A")
+                    st.session_state.dataset = df
+                    st.session_state.data_format = "CSV"
+                    st.session_state.uploaded_file = user_file.name
+                    st.session_state.data_validated = True
+                    st.session_state.run_status = "idle"
+                    st.session_state.results_tomofast = None
+                    st.rerun()
+
+                st.markdown("---")
+
+            st.markdown("#### 📂 Input Data")
+            info_col1, info_col2, info_col3, info_col4 = st.columns(4)
+            with info_col1:
+                st.metric("Source File", uploaded_name[:25])
+            with info_col2:
+                st.metric("Stations", f"{len(dataset):,}" if dataset is not None else "N/A")
+            with info_col3:
+                if dataset is not None and "Value" in dataset.columns:
+                    vmin, vmax = dataset["Value"].min(), dataset["Value"].max()
+                    st.metric("Value Range", f"{vmin:.4f} – {vmax:.4f}")
+                else:
+                    st.metric("Value Range", "N/A")
+            with info_col4:
+                if dataset is not None and "X" in dataset.columns:
+                    x_range = dataset["X"].max() - dataset["X"].min()
+                    y_range = dataset["Y"].max() - dataset["Y"].min()
+                    st.metric("Survey Extent", f"{x_range:.0f} × {y_range:.0f} m")
+                else:
+                    st.metric("Survey Extent", "N/A")
+
+            st.markdown("")
+
+            # Inversion parameters
+            st.markdown("#### ⚙️ Inversion Parameters")
+            col1, col2, col3 = st.columns([2, 2, 2])
+            with col1:
+                n_iters = st.number_input("Major Iterations", min_value=1, max_value=200, value=30, key="active_iters")
+            with col2:
+                reg_strength = st.select_slider(
+                    "Regularization",
+                    options=["Weak", "Medium", "Strong"],
+                    value="Medium",
+                    key="active_reg_strength",
+                    help="Weak = fits data better (risk overfitting). Strong = smoother model (risk underfitting).",
+                )
+            with col3:
+                detected_type = _detect_data_type()
+                data_type_choice = st.selectbox(
+                    "Data Type",
+                    options=["Gravity", "Magnetic"],
+                    index=0 if detected_type == "gravity" else 1,
+                    key="active_data_type",
+                )
+
+            # Show selected engines from Setup page
+            use_tomo = st.session_state.get("use_tomofast", False)
+            use_simpeg = st.session_state.get("use_simpeg", False)
+            if use_tomo and use_simpeg:
+                st.caption("🔄 Running both **Tomofast-x** and **SimPEG** (selected in Setup)")
+            elif use_simpeg:
+                st.caption("🔬 Running **SimPEG** (selected in Setup)")
+            elif use_tomo:
+                st.caption("⚡ Running **Tomofast-x** (selected in Setup)")
+            else:
+                st.warning("⚠️ No algorithm selected. Go to Setup to select Tomofast-x and/or SimPEG.")
+            with st.expander("📋 Generated Parfile Details (preview)", expanded=False):
+                if dataset is not None:
+                    n_pts = len(dataset)
+                    if data_source == "demo":
+                        nx, ny, nz = 20, 20, 10
+                        cell_info = "50.0 × 50.0 × 50.0 m (fixed)"
+                    else:
+                        # Calculate auto mesh like run_preparation would
+                        import numpy as _np
+                        x_vals = dataset["X"].dropna().values if "X" in dataset.columns else _np.zeros(1)
+                        y_vals = dataset["Y"].dropna().values if "Y" in dataset.columns else _np.zeros(1)
+                        x_rng = float(x_vals.max() - x_vals.min()) if len(x_vals) > 1 else 1000.0
+                        y_rng = float(y_vals.max() - y_vals.min()) if len(y_vals) > 1 else 1000.0
+                        max_rng = max(x_rng, y_rng)
+                        if max_rng <= 0:
+                            max_rng = 1000.0
+                        spacing = _np.sqrt((x_rng * y_rng) / max(n_pts, 1)) if x_rng > 0 and y_rng > 0 else max_rng / 10.0
+                        if spacing <= 0 or _np.isnan(spacing):
+                            spacing = max_rng / 10.0
+                        nx = min(30, max(5, int(_np.ceil(x_rng / spacing))))
+                        ny = min(30, max(5, int(_np.ceil(y_rng / spacing))))
+                        nz = min(15, max(5, int(_np.ceil((max_rng * 0.5) / spacing))))
+                        dx = x_rng / nx if nx > 0 else 50.0
+                        dy = y_rng / ny if ny > 0 else 50.0
+                        dz = (max_rng * 0.5) / nz if nz > 0 else 50.0
+                        cell_info = f"{dx:.1f} × {dy:.1f} × {dz:.1f} m (auto)"
+
+                    detail_cols = st.columns(3)
+                    with detail_cols[0]:
+                        st.markdown("**Grid Dimensions**")
+                        st.code(f"nx × ny × nz = {nx} × {ny} × {nz}\nTotal cells: {nx*ny*nz:,}")
+                    with detail_cols[1]:
+                        st.markdown("**Cell Size**")
+                        st.code(cell_info)
+                    with detail_cols[2]:
+                        st.markdown("**Inversion Settings**")
+                        st.code(f"Solver: LSQR\nMinor iterations: 100\nDepth weighting: ON (power=2)\nDamping: 1.0e-06\nSmoothing: 9.0e-05")
+
+                    st.markdown("**Data columns being used:**")
+                    cols_used = []
+                    for c in dataset.columns:
+                        if c in ("X", "Y", "Z", "Value"):
+                            cols_used.append(f"✅ `{c}` → {c}")
+                        else:
+                            cols_used.append(f"⬜ `{c}` (not used)")
+                    st.markdown("  \n".join(cols_used))
+
+                    st.markdown(f"**Output directory:** `workspace/{'demo_gravity' if data_source == 'demo' else 'user_inversion'}/output/`")
+                else:
+                    st.warning("No dataset loaded.")
+
+            st.markdown("")
+
+            run_col1, run_col2, _ = st.columns([1, 1, 2])
+            with run_col1:
+                if run_status in ("idle", "completed", "cancelled", "failed"):
+                    if st.button("⚡ Run Inversion on My Data", type="primary", key="run_active"):
+                        st.session_state.run_status = "running"
+                        st.session_state.start_time = datetime.now()
+                        st.session_state.run_mode = "active_data"
+                        st.session_state.active_n_iters = n_iters
+                        # Clear old results
+                        st.session_state.results_tomofast = None
+                        st.session_state.misfit_history_tomofast = []
+                        st.rerun()
+            with run_col2:
+                if run_status == "completed":
+                    if st.button("📊 View Results", key="view_active"):
+                        st.session_state.current_page = "compare"
+                        st.rerun()
+
+    # --- Tab 2: Pre-bundled examples ---
+    with tab_examples if data_source != "none" else tab_examples:
+        # Get available parfiles
+        parfiles = get_available_parfiles()
+
+        if not parfiles:
+            st.warning("No pre-bundled Parfiles found in Tomofast-x directory.")
+        else:
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                selected_name = st.selectbox(
+                    "Choose an inversion example",
+                    options=list(parfiles.keys()),
+                    index=list(parfiles.keys()).index("Hamersley Grav") if "Hamersley Grav" in parfiles else 0,
+                    help="Select a pre-configured Parfile to run",
+                )
+            with col2:
+                st.markdown("")
+                st.markdown("")
+                selected_parfile = parfiles[selected_name]
+                st.caption(f"📄 `{selected_parfile}`")
+
+            # Show Parfile details
+            parfile_full = os.path.join(TOMOFAST_DIR, selected_parfile)
+            if os.path.exists(parfile_full):
+                with st.expander("📋 Parfile Parameters"):
+                    with open(parfile_full, "r") as f:
+                        content = f.read()
+                    desc = re.search(r"description\s*=\s*(.+)", content)
+                    grid = re.search(r"modelGrid\.size\s*=\s*(.+)", content)
+                    ndata = re.search(r"nData\s*=\s*(\d+)", content)
+                    niters = re.search(r"nMajorIterations\s*=\s*(\d+)", content)
+
+                    info_cols = st.columns(4)
+                    with info_cols[0]:
+                        st.metric("Grid Size", grid.group(1).strip() if grid else "N/A")
+                    with info_cols[1]:
+                        st.metric("Data Points", ndata.group(1) if ndata else "N/A")
+                    with info_cols[2]:
+                        st.metric("Major Iterations", niters.group(1) if niters else "N/A")
+                    with info_cols[3]:
+                        st.metric("Description", desc.group(1).strip()[:30] if desc else "N/A")
+
+            st.markdown("")
+            run_col1, run_col2, _ = st.columns([1, 1, 2])
+            with run_col1:
+                if run_status in ("idle", "completed", "cancelled", "failed"):
+                    if st.button("⚡ Run Example", type="secondary", key="run_example"):
+                        st.session_state.run_status = "running"
+                        st.session_state.start_time = datetime.now()
+                        st.session_state.run_mode = "example"
+                        st.session_state.selected_parfile = selected_parfile
+                        st.rerun()
+            with run_col2:
+                if run_status == "completed":
+                    if st.button("📊 View Results", key="view_example"):
+                        st.session_state.current_page = "compare"
+                        st.rerun()
 
     st.markdown("---")
 
-    # Run button
-    col1, col2, col3 = st.columns([1, 1, 2])
-    with col1:
-        if run_status in ("idle", "completed", "cancelled", "failed"):
-            if st.button("⚡ Run Tomofast-x", type="primary"):
-                st.session_state.run_status = "running"
-                st.session_state.start_time = datetime.now()
-                st.session_state.selected_parfile = selected_parfile
-                st.rerun()
-    with col2:
-        if run_status == "completed":
-            if st.button("📊 View Comparison"):
-                st.session_state.current_page = "compare"
-                st.rerun()
-
     # Execute inversion if triggered
     if run_status == "running":
-        parfile_to_run = st.session_state.get("selected_parfile", selected_parfile)
-        run_full_inversion(parfile_to_run)
-        st.rerun()
+        run_mode = st.session_state.get("run_mode", "example")
+
+        if run_mode == "active_data":
+            # Prepare data dynamically and run
+            n_iters = st.session_state.get("active_n_iters", 10)
+            dataset = st.session_state.get("dataset")
+            use_tomo = st.session_state.get("use_tomofast", False)
+            use_simpeg_flag = st.session_state.get("use_simpeg", False)
+
+            if dataset is None:
+                st.error("No dataset in session. Please load data first.")
+                st.session_state.run_status = "failed"
+                st.rerun()
+                return
+
+            data_src = _get_data_source()
+            data_type_sel = st.session_state.get("active_data_type", "Gravity").lower()
+            reg_str = st.session_state.get("active_reg_strength", "Medium").lower()
+            config = st.session_state.get("config", {})
+
+            # Run Tomofast-x if selected
+            if use_tomo:
+                with st.spinner("Running Tomofast-x inversion..."):
+                    from skills.tomofast.run_preparation import prepare_inversion
+                    run_label = "demo_gravity" if data_src == "demo" else "user_inversion"
+                    mesh_spec = {"nx": 20, "ny": 20, "nz": 10, "cell_size": (50.0, 50.0, 50.0)} if data_src == "demo" else None
+
+                    try:
+                        prep_result = prepare_inversion(
+                            dataset=dataset,
+                            data_type=data_type_sel,
+                            n_iterations=n_iters,
+                            mesh_spec=mesh_spec,
+                            run_label=run_label,
+                            reg_strength=reg_str,
+                            mag_inclination=config.get("inclination", -60.0),
+                            mag_declination=config.get("declination", 0.0),
+                            mag_intensity=config.get("field_strength", 0.0),
+                        )
+                        parfile_to_run = prep_result["parfile_rel_path"]
+                    except Exception as e:
+                        st.error(f"Failed to prepare Tomofast-x inversion: {e}")
+                        st.session_state.run_status = "failed"
+                        st.rerun()
+                        return
+
+                run_full_inversion(parfile_to_run)
+
+            # Run SimPEG if selected
+            if use_simpeg_flag:
+                with st.spinner("Running SimPEG inversion..."):
+                    from skills.simpeg.run_preparation import prepare_and_run_inversion as simpeg_run
+                    try:
+                        simpeg_result = simpeg_run(
+                            dataset=dataset,
+                            data_type=data_type_sel,
+                            n_iterations=n_iters,
+                            reg_strength=reg_str,
+                            mag_inclination=config.get("inclination", -60.0),
+                            mag_declination=config.get("declination", 0.0),
+                            mag_intensity=config.get("field_strength", 0.0),
+                        )
+                        if simpeg_result["success"]:
+                            st.session_state.results_simpeg = {
+                                "model": simpeg_result["model"],
+                                "misfit_history": simpeg_result["misfit_history"],
+                                "iterations": simpeg_result["iterations"],
+                                "final_misfit": simpeg_result["final_misfit"],
+                                "runtime": simpeg_result["runtime"],
+                                "parsed": simpeg_result["parsed"],
+                            }
+                            if not use_tomo:
+                                # Only SimPEG — set as completed
+                                st.session_state.run_status = "completed"
+                        else:
+                            st.error(f"SimPEG failed: {simpeg_result.get('error', 'Unknown error')}")
+                            if not use_tomo:
+                                st.session_state.run_status = "failed"
+                    except Exception as e:
+                        st.error(f"SimPEG error: {e}")
+                        if not use_tomo:
+                            st.session_state.run_status = "failed"
+
+            st.rerun()
+        else:
+            parfile_to_run = st.session_state.get("selected_parfile", "")
+            run_full_inversion(parfile_to_run)
+            st.rerun()
 
     # --- Results Section ---
     if run_status == "completed" and st.session_state.get("results_tomofast"):
@@ -458,6 +987,18 @@ def render_run_page():
         results = st.session_state.results_tomofast
         parsed = results.get("parsed", {})
 
+        # Compression badge
+        compression_type = results.get("compression_type", 0)
+        if compression_type == 1:
+            compression_rate = results.get("compression_rate", 0.15)
+            st.info(
+                f"🗜️ **Wavelet compression enabled** (rate: {compression_rate:.0%}) — "
+                f"auto-applied to fit sensitivity matrix in available memory. "
+                f"Results may have minor numerical differences vs. uncompressed."
+            )
+        else:
+            st.success("✅ **No compression** — full sensitivity matrix used.")
+
         # Summary metrics
         m_col1, m_col2, m_col3, m_col4 = st.columns(4)
         with m_col1:
@@ -466,7 +1007,12 @@ def render_run_page():
             rmse = parsed.get("final_rmse")
             st.metric("Final RMSE", f"{rmse:.2e}" if rmse else "N/A")
         with m_col3:
-            st.metric("Model Range", f"[{parsed.get('model_min', 0):.1f}, {parsed.get('model_max', 0):.1f}]")
+            model_min = parsed.get("model_min")
+            model_max = parsed.get("model_max")
+            if model_min is not None and model_max is not None:
+                st.metric("Model Range", f"[{model_min:.1f}, {model_max:.1f}]")
+            else:
+                st.metric("Model Range", "N/A")
         with m_col4:
             mem = parsed.get("memory_gb")
             st.metric("Memory (GB)", f"{mem:.4f}" if mem else "N/A")
@@ -494,6 +1040,14 @@ def render_run_page():
                 for f in txt_files:
                     st.caption(f"📄 `{f.relative_to(output_dir)}`")
 
+        # --- 3D Model Visualization ---
+        if output_dir and os.path.exists(output_dir):
+            model_3d = _load_result_model_3d(results)
+            if model_3d is not None:
+                st.markdown("---")
+                st.subheader("🌐 3D Model Visualization")
+                _render_result_3d_model(model_3d)
+
         # Raw stdout
         with st.expander("🖥️ Tomofast-x Raw Output"):
             st.code(results.get("stdout", "No output captured"), language="text")
@@ -501,6 +1055,44 @@ def render_run_page():
     elif run_status == "failed":
         st.error("❌ Inversion failed. Check the log below for details.")
 
-    # --- Full Log Section ---
-    st.markdown("---")
-    _render_full_log_section()
+    # --- SimPEG Results Section ---
+    if run_status == "completed" and st.session_state.get("results_simpeg"):
+        st.markdown("---")
+        st.subheader("🔬 SimPEG Results")
+
+        simpeg_results = st.session_state.results_simpeg
+        parsed_s = simpeg_results.get("parsed", {})
+
+        # Summary metrics
+        s_col1, s_col2, s_col3, s_col4 = st.columns(4)
+        with s_col1:
+            st.metric("Iterations", parsed_s.get("iterations_completed", "N/A"))
+        with s_col2:
+            rmse_s = parsed_s.get("final_rmse")
+            st.metric("Final RMSE", f"{rmse_s:.2e}" if rmse_s else "N/A")
+        with s_col3:
+            model_min_s = parsed_s.get("model_min")
+            model_max_s = parsed_s.get("model_max")
+            if model_min_s is not None and model_max_s is not None:
+                st.metric("Model Range", f"[{model_min_s:.4f}, {model_max_s:.4f}]")
+            else:
+                st.metric("Model Range", "N/A")
+        with s_col4:
+            runtime_s = simpeg_results.get("runtime")
+            st.metric("Runtime (s)", f"{runtime_s:.1f}" if runtime_s else "N/A")
+
+        # Convergence
+        misfit_s = simpeg_results.get("misfit_history", [])
+        if misfit_s:
+            import plotly.graph_objects as go
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(y=misfit_s, mode="lines+markers", name="SimPEG Data Misfit"))
+            fig.update_layout(title="SimPEG Convergence", xaxis_title="Iteration", yaxis_title="Data Misfit",
+                              height=300, template="plotly_white")
+            st.plotly_chart(fig, use_container_width=True)
+
+        # 3D Model
+        model_3d_s = simpeg_results.get("model")
+        if model_3d_s is not None and hasattr(model_3d_s, "shape") and len(model_3d_s.shape) == 3:
+            st.subheader("🌐 SimPEG 3D Model")
+            _render_result_3d_model(model_3d_s)
