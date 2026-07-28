@@ -146,8 +146,8 @@ def run_tomofast_inversion(parfile_path: str, output_dir: str) -> dict:
             n_cells = int(grid_match.group(1)) * int(grid_match.group(2)) * int(grid_match.group(3))
             n_data = int(ndata_match.group(1))
             sensitivity_gb = (n_data * n_cells * 8) / (1024**3)
-            # Scale timeout: ~60s per GB of sensitivity, minimum 300s, max 3600s
-            timeout_seconds = max(300, min(3600, int(sensitivity_gb * 120)))
+            # Scale timeout: ~200s per GB of sensitivity, minimum 600s, max 3600s
+            timeout_seconds = max(600, min(3600, int(sensitivity_gb * 200)))
     except Exception:
         pass  # Fall back to default
 
@@ -648,7 +648,7 @@ def render_run_page():
 
     # Mode tabs: Active Data vs Pre-bundled Examples
     if data_source != "none":
-        tab_examples, tab_active = st.tabs(["📁 Pre-bundled Examples", "📊 Run My Data"])
+        tab_active, tab_examples = st.tabs(["📊 Run My Data", "📁 Pre-bundled Examples"])
     else:
         tab_active = None
         tab_examples = st.container()

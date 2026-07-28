@@ -467,13 +467,15 @@ forward.magneticField.XaxisDeclination       = 0.d0
     else:
         mag_field_section = ""
 
-    # Auto-enable wavelet compression if sensitivity matrix would exceed ~6 GB
+    # Auto-enable wavelet compression if sensitivity matrix would exceed available memory.
+    # In Docker (typically 8 GB total), ~4 GB is available after OS/Python/Streamlit overhead.
+    # Enable compression when uncompressed matrix exceeds 3 GB to ensure it fits.
     # Sensitivity matrix size = n_data * n_cells * 8 bytes (float64)
     n_cells = nx * ny * nz
     sensitivity_bytes = n_data * n_cells * 8
     sensitivity_gb = sensitivity_bytes / (1024**3)
 
-    if sensitivity_gb > 6.0:
+    if sensitivity_gb > 3.0:
         compression_type = 1  # wavelet compression
         # More aggressive compression for larger matrices
         if sensitivity_gb > 20.0:
