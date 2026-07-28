@@ -74,11 +74,11 @@ def parse_data(content: str, fmt: str) -> pd.DataFrame:
             typical_ncols = 0
 
             for line in lines:
-                stripped = line.strip()
+                stripped = line.strip().lstrip("\ufeff")
                 if not stripped:
                     continue
                 # Skip comment lines
-                if stripped.startswith("/") or stripped.startswith("#") or stripped.startswith("!"):
+                if stripped.startswith(("/", "#", "!", "%")):
                     continue
                 # Skip lines that don't start with a number (title lines)
                 tokens = stripped.split()
@@ -118,43 +118,118 @@ def parse_data(content: str, fmt: str) -> pd.DataFrame:
             return None
 
         elif fmt in ("XYZ", "Unknown"):
-            # Try space-delimited
-            df = pd.read_csv(StringIO(content), sep=r"\s+", header=None)
-            if df.shape[1] >= 4:
-                df.columns = ["X", "Y", "Z", "Value"] + [
-                    f"Col{i}" for i in range(4, df.shape[1])
+            # Space-delimited data — may have count headers or comment lines
+            lines = content.strip().split("\n")
+            candidate_lines = []  # (ncols, stripped_line)
+
+            for line in lines:
+                stripped = line.strip().lstrip("\ufeff")
+                if not stripped:
+                    continue
+                # Skip comment lines
+                if stripped.startswith(("/", "#", "!", "%")):
+                    continue
+                tokens = stripped.split()
+                # Skip single-value lines (count headers)
+                if len(tokens) <= 1:
+                    continue
+                # Check that all tokens are numeric
+                try:
+                    [float(t) for t in tokens]
+                except ValueError:
+                    # Could be a text header line — skip it
+                    continue
+                candidate_lines.append((len(tokens), stripped))
+
+            if candidate_lines:
+                from collections import Counter
+                col_counts = Counter(ncols for ncols, _ in candidate_lines)
+                typical_ncols = col_counts.most_common(1)[0][0]
+
+                # Keep only lines matching the dominant column count
+                data_lines = [
+                    ln for ncols, ln in candidate_lines
+                    if abs(ncols - typical_ncols) <= 1 and ncols >= typical_ncols
                 ]
-            elif df.shape[1] == 3:
-                df.columns = ["X", "Y", "Value"]
-            # Ensure numeric
-            for col in ["X", "Y", "Z", "Value"]:
-                if col in df.columns:
-                    df[col] = pd.to_numeric(df[col], errors="coerce")
-            return df
+            else:
+                data_lines = []
+
+            if data_lines:
+                data_content = "\n".join(data_lines)
+                df = pd.read_csv(StringIO(data_content), sep=r"\s+", header=None)
+                if df.shape[1] >= 4:
+                    df.columns = ["X", "Y", "Z", "Value"] + [
+                        f"Col{i}" for i in range(4, df.shape[1])
+                    ]
+                elif df.shape[1] == 3:
+                    df.columns = ["X", "Y", "Value"]
+                # Ensure numeric
+                for col in ["X", "Y", "Z", "Value"]:
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors="coerce")
+                return df
+            return None
 
         elif fmt.startswith("UBC"):
+            # UBC-GIF format: may have header lines before data
+            # - GIF gravity: line1=N, then x y z data [std]
+            # - GIF magnetic: line1=field params (3 floats), line2=measurement dir,
+            #   line3=N, then x y z data [std]
+            # - Tomofast-x style: line1=N, then x y z data [std]
+            # Strategy: collect all numeric multi-column lines, determine the
+            # dominant column count, then keep only those lines.
             lines = content.strip().split("\n")
-            # Skip header line (number of observations)
-            start_idx = 0
-            try:
-                int(lines[0].strip())
-                start_idx = 1
-            except ValueError:
-                pass
+            candidate_lines = []  # (ncols, stripped_line)
 
-            data_lines = "\n".join(lines[start_idx:])
-            df = pd.read_csv(StringIO(data_lines), sep=r"\s+", header=None)
-            if df.shape[1] >= 4:
-                df.columns = ["X", "Y", "Z", "Value"] + [
-                    f"Col{i}" for i in range(4, df.shape[1])
+            for line in lines:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                # Remove BOM if present
+                stripped = stripped.lstrip("\ufeff")
+                # Skip comment lines
+                if stripped.startswith(("/", "#", "!", "%")):
+                    continue
+                tokens = stripped.split()
+                # Skip single-value lines (count headers like "13376")
+                if len(tokens) <= 1:
+                    continue
+                # Check that all tokens are numeric
+                try:
+                    [float(t) for t in tokens]
+                except ValueError:
+                    continue
+                candidate_lines.append((len(tokens), stripped))
+
+            # Determine the dominant column count (most frequent)
+            if candidate_lines:
+                from collections import Counter
+                col_counts = Counter(ncols for ncols, _ in candidate_lines)
+                typical_ncols = col_counts.most_common(1)[0][0]
+
+                # Keep only lines matching the dominant column count (±1)
+                data_lines = [
+                    ln for ncols, ln in candidate_lines
+                    if abs(ncols - typical_ncols) <= 1 and ncols >= typical_ncols
                 ]
-            elif df.shape[1] == 3:
-                df.columns = ["X", "Y", "Value"]
-            # Ensure numeric
-            for col in ["X", "Y", "Z", "Value"]:
-                if col in df.columns:
-                    df[col] = pd.to_numeric(df[col], errors="coerce")
-            return df
+            else:
+                data_lines = []
+
+            if data_lines:
+                data_content = "\n".join(data_lines)
+                df = pd.read_csv(StringIO(data_content), sep=r"\s+", header=None)
+                if df.shape[1] >= 4:
+                    df.columns = ["X", "Y", "Z", "Value"] + [
+                        f"Col{i}" for i in range(4, df.shape[1])
+                    ]
+                elif df.shape[1] == 3:
+                    df.columns = ["X", "Y", "Value"]
+                # Ensure numeric
+                for col in ["X", "Y", "Z", "Value"]:
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors="coerce")
+                return df
+            return None
 
     except Exception as e:
         st.error(f"Error parsing data: {e}")

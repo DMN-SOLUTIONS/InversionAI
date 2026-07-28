@@ -253,8 +253,23 @@ def _auto_mesh_dims(dataset: pd.DataFrame) -> Tuple[int, int, int]:
         depth_extent = max_range * 0.5
         nz = max(5, int(np.ceil(depth_extent / cell_size)))
 
-    # Cap total cells to ~100k for reasonable runtime
-    max_total = 100000
+    # Cap total cells based on available memory for the sensitivity matrix.
+    # Sensitivity matrix = n_data * n_cells * 8 bytes.
+    # With wavelet compression (15%), target max ~4 GB compressed (~27 GB uncompressed).
+    # Without compression, target max ~6 GB.
+    # For Docker with 8 GB total, keep sensitivity under 4 GB compressed = 27 GB raw.
+    # But also enforce a stricter limit to ensure reasonable runtimes (<10 min).
+    # Target: sensitivity_gb * compression_rate < 2 GB => n_cells < 2 GB / (n_data * 8 * 0.15)
+    n_data = len(dataset)
+    max_sensitivity_compressed_gb = 2.0  # target max compressed matrix size
+    compression_rate = 0.15
+    max_cells_by_memory = int(
+        (max_sensitivity_compressed_gb * 1024**3) / (n_data * 8 * compression_rate)
+    )
+    # Also cap at 50k cells for reasonable runtime in Docker
+    max_total = min(50000, max_cells_by_memory)
+    max_total = max(max_total, 1000)  # minimum sensible mesh
+
     total = nx * ny * nz
     if total > max_total:
         scale = (max_total / total) ** (1.0 / 3.0)
@@ -452,6 +467,25 @@ forward.magneticField.XaxisDeclination       = 0.d0
     else:
         mag_field_section = ""
 
+    # Auto-enable wavelet compression if sensitivity matrix would exceed ~6 GB
+    # Sensitivity matrix size = n_data * n_cells * 8 bytes (float64)
+    n_cells = nx * ny * nz
+    sensitivity_bytes = n_data * n_cells * 8
+    sensitivity_gb = sensitivity_bytes / (1024**3)
+
+    if sensitivity_gb > 6.0:
+        compression_type = 1  # wavelet compression
+        # More aggressive compression for larger matrices
+        if sensitivity_gb > 20.0:
+            compression_rate = 0.05
+        elif sensitivity_gb > 10.0:
+            compression_rate = 0.10
+        else:
+            compression_rate = 0.15
+    else:
+        compression_type = 0  # no compression
+        compression_rate = 0.15
+
     content = f"""===================================================================================
 GLOBAL
 ===================================================================================
@@ -487,8 +521,8 @@ sensit.folderPath                   = SENSIT/
 MATRIX COMPRESSION
 ===================================================================================
 # 0-none, 1-wavelet compression.
-forward.matrixCompression.type      = 0
-forward.matrixCompression.rate      = 0.15
+forward.matrixCompression.type      = {compression_type}
+forward.matrixCompression.rate      = {compression_rate}
 
 ===================================================================================
 PRIOR MODEL

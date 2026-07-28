@@ -133,6 +133,28 @@ def run_tomofast_inversion(parfile_path: str, output_dir: str) -> dict:
         "binary": TOMOFAST_BIN,
     })
 
+    # Compute adaptive timeout based on problem size from parfile
+    # Large problems (sensitivity matrix > 1 GB) need significantly more time
+    timeout_seconds = 300  # default: 5 minutes
+    parfile_full_path = os.path.join(TOMOFAST_DIR, parfile_path)
+    try:
+        with open(parfile_full_path, "r") as pf:
+            pf_content = pf.read()
+        grid_match = re.search(r"modelGrid\.size\s*=\s*(\d+)\s+(\d+)\s+(\d+)", pf_content)
+        ndata_match = re.search(r"nData\s*=\s*(\d+)", pf_content)
+        if grid_match and ndata_match:
+            n_cells = int(grid_match.group(1)) * int(grid_match.group(2)) * int(grid_match.group(3))
+            n_data = int(ndata_match.group(1))
+            sensitivity_gb = (n_data * n_cells * 8) / (1024**3)
+            # Scale timeout: ~60s per GB of sensitivity, minimum 300s, max 3600s
+            timeout_seconds = max(300, min(3600, int(sensitivity_gb * 120)))
+    except Exception:
+        pass  # Fall back to default
+
+    event_logger.log_skill("TomofastSkill", f"Timeout set to {timeout_seconds}s", details={
+        "estimated_sensitivity_gb": f"{sensitivity_gb:.1f}" if 'sensitivity_gb' in dir() else "unknown",
+    })
+
     # Ensure output directory exists
     full_output = os.path.join(TOMOFAST_DIR, output_dir)
     os.makedirs(full_output, exist_ok=True)
@@ -149,7 +171,7 @@ def run_tomofast_inversion(parfile_path: str, output_dir: str) -> dict:
             capture_output=True,
             text=True,
             cwd=TOMOFAST_DIR,
-            timeout=300,  # 5 minute timeout
+            timeout=timeout_seconds,
         )
 
         stdout = result.stdout
@@ -185,8 +207,8 @@ def run_tomofast_inversion(parfile_path: str, output_dir: str) -> dict:
         }
 
     except subprocess.TimeoutExpired:
-        event_logger.log_skill("TomofastSkill", "Tomofast-x timed out after 300s", level=LogLevel.ERROR)
-        return {"success": False, "error": "Timeout after 300 seconds"}
+        event_logger.log_skill("TomofastSkill", f"Tomofast-x timed out after {timeout_seconds}s", level=LogLevel.ERROR)
+        return {"success": False, "error": f"Timeout after {timeout_seconds} seconds"}
     except Exception as e:
         event_logger.log_skill("TomofastSkill", f"Error running Tomofast-x: {str(e)}", level=LogLevel.ERROR)
         return {"success": False, "error": str(e)}
@@ -233,6 +255,12 @@ def run_full_inversion(parfile_rel_path: str):
             match = re.search(r"nData\s*=\s*(\d+)", content)
             if match:
                 parfile_info["n_data"] = int(match.group(1))
+            match = re.search(r"matrixCompression\.type\s*=\s*(\d+)", content)
+            if match:
+                parfile_info["compression_type"] = int(match.group(1))
+            match = re.search(r"matrixCompression\.rate\s*=\s*([\d.]+)", content)
+            if match:
+                parfile_info["compression_rate"] = float(match.group(1))
     except Exception as e:
         event_logger.log_tool("parfile_reader", f"Error reading Parfile: {e}", level=LogLevel.ERROR)
 
@@ -283,6 +311,8 @@ def run_full_inversion(parfile_rel_path: str):
             "final_misfit": result["misfit_history"][-1] if result["misfit_history"] else None,
             "iterations": result["parsed"]["iterations_completed"],
             "stdout": result["stdout"],
+            "compression_type": parfile_info.get("compression_type", 0),
+            "compression_rate": parfile_info.get("compression_rate", 0.15),
         }
         st.session_state.current_iteration_tomofast = result["parsed"]["iterations_completed"]
         st.session_state.progress_tomofast = 1.0
@@ -957,6 +987,18 @@ def render_run_page():
         results = st.session_state.results_tomofast
         parsed = results.get("parsed", {})
 
+        # Compression badge
+        compression_type = results.get("compression_type", 0)
+        if compression_type == 1:
+            compression_rate = results.get("compression_rate", 0.15)
+            st.info(
+                f"🗜️ **Wavelet compression enabled** (rate: {compression_rate:.0%}) — "
+                f"auto-applied to fit sensitivity matrix in available memory. "
+                f"Results may have minor numerical differences vs. uncompressed."
+            )
+        else:
+            st.success("✅ **No compression** — full sensitivity matrix used.")
+
         # Summary metrics
         m_col1, m_col2, m_col3, m_col4 = st.columns(4)
         with m_col1:
@@ -1012,3 +1054,45 @@ def render_run_page():
 
     elif run_status == "failed":
         st.error("❌ Inversion failed. Check the log below for details.")
+
+    # --- SimPEG Results Section ---
+    if run_status == "completed" and st.session_state.get("results_simpeg"):
+        st.markdown("---")
+        st.subheader("🔬 SimPEG Results")
+
+        simpeg_results = st.session_state.results_simpeg
+        parsed_s = simpeg_results.get("parsed", {})
+
+        # Summary metrics
+        s_col1, s_col2, s_col3, s_col4 = st.columns(4)
+        with s_col1:
+            st.metric("Iterations", parsed_s.get("iterations_completed", "N/A"))
+        with s_col2:
+            rmse_s = parsed_s.get("final_rmse")
+            st.metric("Final RMSE", f"{rmse_s:.2e}" if rmse_s else "N/A")
+        with s_col3:
+            model_min_s = parsed_s.get("model_min")
+            model_max_s = parsed_s.get("model_max")
+            if model_min_s is not None and model_max_s is not None:
+                st.metric("Model Range", f"[{model_min_s:.4f}, {model_max_s:.4f}]")
+            else:
+                st.metric("Model Range", "N/A")
+        with s_col4:
+            runtime_s = simpeg_results.get("runtime")
+            st.metric("Runtime (s)", f"{runtime_s:.1f}" if runtime_s else "N/A")
+
+        # Convergence
+        misfit_s = simpeg_results.get("misfit_history", [])
+        if misfit_s:
+            import plotly.graph_objects as go
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(y=misfit_s, mode="lines+markers", name="SimPEG Data Misfit"))
+            fig.update_layout(title="SimPEG Convergence", xaxis_title="Iteration", yaxis_title="Data Misfit",
+                              height=300, template="plotly_white")
+            st.plotly_chart(fig, use_container_width=True)
+
+        # 3D Model
+        model_3d_s = simpeg_results.get("model")
+        if model_3d_s is not None and hasattr(model_3d_s, "shape") and len(model_3d_s.shape) == 3:
+            st.subheader("🌐 SimPEG 3D Model")
+            _render_result_3d_model(model_3d_s)
